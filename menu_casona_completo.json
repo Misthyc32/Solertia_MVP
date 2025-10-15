@@ -1,0 +1,221 @@
+{
+  "entradas_frias": [
+    {
+      "nombre": "Tabla de Quesos Mexicanos",
+      "ingredientes": "Quesillo ahumado, queso semicurado de oveja, cotija, de cabra con epazote y jamón serrano",
+      "precio": 240
+    },
+    {
+      "nombre": "Carpaccio de Salmón",
+      "ingredientes": "Láminas de salmón fresco bañadas con vinagreta de la casa, aceitunas, poro frito, jitomate, alcaparras y queso parmesano fresco",
+      "precio": 280
+    },
+    {
+      "nombre": "Carpaccio de Res",
+      "ingredientes": "Láminas de filete de res aderezadas con vinagreta de la casa, arúgula, alcaparras y queso parmesano fresco",
+      "precio": 260
+    },
+    {
+      "nombre": "Tostadas de Cachete y Marlín",
+      "ingredientes": "Acompañadas con coles en escabeche, aceitunas y aguacate",
+      "precio": 220
+    },
+    {
+      "nombre": "Montaditos de Salmón",
+      "ingredientes": "Con miel-limón y alcaparras",
+      "precio": 180
+    },
+    {
+      "nombre": "Montaditos de Jamón Serrano",
+      "ingredientes": "Con aceite de aguacate y poro frito",
+      "precio": 190
+    }
+  ],
+  "entradas_calientes": [
+    {
+      "nombre": "Magdalenas con Chapulines",
+      "ingredientes": "Flores de calabaza rellenas de queso de cabra con chapulines, fritas con tempura con base de chipotle y salsa de anguila",
+      "precio": 200
+    },
+    {
+      "nombre": "Chalupas Arrieras",
+      "ingredientes": "Tuétanos a la parrilla, guacamole, pico de gallo y tortillas de comal",
+      "precio": 180
+    },
+    {
+      "nombre": "Infladitas de Chinicuil",
+      "ingredientes": "Sofritas con salsa de tomate y rellenas de guacamole",
+      "precio": 190
+    },
+    {
+      "nombre": "Orden de Cecina con Guacamole",
+      "ingredientes": "Láminas de cecina frita, acompañadas de guacamole con trocitos de piña asada con canela",
+      "precio": 230
+    },
+    {
+      "nombre": "Carnitas de Atún",
+      "ingredientes": "Acompañadas con guacamole y tortillas de comal",
+      "precio": 210
+    },
+    {
+      "nombre": "Chilorio de Marlín sobre Queso Fundido",
+      "ingredientes": "Con queso provolone y gouda, acompañado de guacamole y tortillas azules",
+      "precio": 240
+    },
+    {
+      "nombre": "Gorditas de Masa Quebrada",
+      "ingredientes": "Rellenas de una combinación de requesón, rajas y huitlacoche",
+      "precio": 160
+    },
+    {
+      "nombre": "Sopes de Pork Belly",
+      "ingredientes": "A cocción lenta, con salsa martajada, aguacate criollo y queso de rancho",
+      "precio": 200
+    },
+    {
+      "nombre": "Escamoles en Mantequilla de Epazote con Tuétano Braseado",
+      "ingredientes": "Salteados con cebolla y chile manzano, acompañados de tortilla de comal azul",
+      "precio": 390
+    },
+    {
+      "nombre": "Flautas de Lechón Adobado",
+      "ingredientes": "Servidas sobre una cama de guacamole, acompañadas de queso fresco, crema, alioli de ajo, pico de gallo y lechuga",
+      "precio": 220
+    },
+    {
+      "nombre": "Empanada de Queso Asadero",
+      "ingredientes": "",
+      "precio": 120
+    },
+    {
+      "nombre": "Empanada de Camarón con Queso y Chile Pasilla",
+      "ingredientes": "",
+      "precio": 140
+    },
+    {
+      "nombre": "Empanada de Lechón",
+      "ingredientes": "",
+      "precio": 130
+    }
+  ],
+  "tacos": [
+    {
+      "nombre": "Cecina de Rib Eye",
+      "ingredientes": "",
+      "precio": 180
+    },
+    {
+      "nombre": "Camarón en Costra de Chicharrón",
+      "ingredientes": "",
+      "precio": 190
+    },
+    {
+      "nombre": "Marlín",
+      "ingredientes": "",
+      "precio": 170
+    },
+    {
+      "nombre": "Chapulines con Queso de Cabra y Guacamole",
+      "ingredientes": "",
+      "precio": 160
+    },
+    {
+      "nombre": "Tacos de Mercado",
+      "ingredientes": "Rellenos de carne deshebrada, bañados en salsa de tomate y acompañados de queso fresco, crema, pico de gallo, lechuga y aguacate criollo",
+      "precio": 170
+    }
+  ],
+  "ensaladas": [
+    {
+      "nombre": "Ensalada La Casona",
+      "ingredientes": "Lechugas mix, espinacas, calamares fritos, cebolla morada, queso de cabra cenizo, arándanos, nuez y vinagreta de la casa",
+      "precio": 180
+    },
+    {
+      "nombre": "Ensalada de Frutos Rojos",
+      "ingredientes": "Arúgula, espinaca, queso de cabra, zarzamora, frambuesa, vinagreta cítrica, queso parmesano fresco y suprema de naranja",
+      "precio": 190
+    },
+    {
+      "nombre": "Ensalada de Atún en Costra de Pimienta",
+      "ingredientes": "Lechugas orgánicas, espárragos, aguacate y chips de camote, con una reducción de soya y mantequilla",
+      "precio": 200
+    }
+  ],
+  "sopas_y_pastas": [
+    {
+      "nombre": "Sopa Tarasca",
+      "ingredientes": "A base de puré de frijol negro, jitomate asado, chile guajillo, tortilla frita, queso fresco, crema y chile pasilla tostado",
+      "precio": 120
+    },
+    {
+      "nombre": "Crema de Chicharrón",
+      "ingredientes": "Con base de jitomate y chile guajillo, acompañada de tierra de chiles secos y queso de rancho",
+      "precio": 130
+    },
+    {
+      "nombre": "Fideo Seco a los Tres Chiles",
+      "ingredientes": "Sobre un espejo de crema de frijol y queso fresco",
+      "precio": 140
+    },
+    {
+      "nombre": "Pasta Progreso",
+      "ingredientes": "Fetuccini en salsa de poblano, hongos, cacahuate, queso de cabra y gratinado con queso asadero",
+      "precio": 220
+    },
+    {
+      "nombre": "Pasta al Ajillo",
+      "ingredientes": "Fetuccini con aceite de oliva, chile guajillo, vino blanco, tocino y un toque de chile serrano",
+      "precio": 210
+    },
+    {
+      "nombre": "Ravioles",
+      "ingredientes": "Rellenos de requesón, bañados en salsa cremosa de alcachofa con camarones y espinacas",
+      "precio": 230
+    }
+  ],
+  "pizza_artesanal": [
+    {
+      "nombre": "La Casona",
+      "ingredientes": "De chilaquiles de salsa pasilla, cebolla, crema y queso",
+      "precio": 200
+    },
+    {
+      "nombre": "Al Pastor",
+      "ingredientes": "Con carne de cerdo adobada, cebolla morada, jalapeño y piña",
+      "precio": 190
+    },
+    {
+      "nombre": "Quesos Mexicanos",
+      "ingredientes": "Quesillo, cotija, semicurado de oveja y cabra",
+      "precio": 210
+    }
+  ],
+  "guarniciones": [
+    {
+      "nombre": "Ensalada Mixta",
+      "ingredientes": "",
+      "precio": 80
+    },
+    {
+      "nombre": "Papas Gajo",
+      "ingredientes": "",
+      "precio": 70
+    },
+    {
+      "nombre": "Guacamole",
+      "ingredientes": "",
+      "precio": 90
+    },
+    {
+      "nombre": "Espárragos",
+      "ingredientes": "",
+      "precio": 100
+    },
+    {
+      "nombre": "Puré de Papa Artesanal",
+      "ingredientes": "",
+      "precio": 85
+    }
+  ]
+}
