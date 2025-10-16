@@ -8,7 +8,7 @@ from typing import Optional
 from db import SessionLocal, get_last_event_id_by_thread
 
 # ID del calendario (puedes cambiarlo por el tuyo)
-CALENDAR_ID = "tturnouno@gmail.com"
+CALENDAR_ID = "solertia.grp@gmail.com"
 
 class ReservaInput(BaseModel):
     name: str = Field(..., description="Nombre del cliente")

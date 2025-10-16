@@ -1,60 +1,137 @@
 # db.py
 import os
-from datetime import datetime
-from sqlalchemy import (
-    create_engine, Column, Integer, String, DateTime, Text,
-    UniqueConstraint, select, desc
-)
+from contextlib import contextmanager
 from typing import Optional
+from datetime import datetime
+
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Text,
+    Date, Time, DateTime, UniqueConstraint, select, desc
+)
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.sql import func
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./sales_ai.db")
+# ------------------------------------------------------------
+# Cómo resolvemos la URL de conexión:
+# 1) SUPABASE_SP_CONN  -> Connection string del pool (recomendado)
+# 2) DATABASE_URL       -> Fallback
+# Nota: SUPABASE_URL y SUPABASE_KEY son para APIs HTTP de Supabase,
+#       no para conectarse vía SQLAlchemy/psycopg.
+# ------------------------------------------------------------
+def resolve_database_url() -> str:
+    url = os.getenv("SUPABASE_SP_CONN") or os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "Falta SUPABASE_SP_CONN o DATABASE_URL. "
+            "Ve a Supabase > Project Settings > Database > Connection string (psycopg)."
+        )
+    # Asegura SSL si no viene en la URL
+    if "sslmode=" not in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}sslmode=require"
+    return url
 
-engine = create_engine(DATABASE_URL, future=True)
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+DATABASE_URL = resolve_database_url()
+
+# ------------------------------------------------------------
+# Engine con session pooler (sincrónico)
+# ------------------------------------------------------------
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800,
+    future=True,
+)
+
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
 Base = declarative_base()
+
+# ------------------------------------------------------------
+# MODELOS (alineados con Supabase/Postgres)
+# users: ya lo tienes creado en Supabase (id, thread_id, phone, name, created_at)
+# messages / reservations: tipos fuertes (date/time/timestamptz)
+# ------------------------------------------------------------
 
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
-    thread_id = Column(String, unique=True, index=True)  # tu ID lógico por cliente
+    thread_id = Column(String, unique=True, index=True)  # lógico por cliente
     phone = Column(String, nullable=True, index=True)
     name = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # timestamptz en DB -> usa func.now() para que lo ponga Postgres
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class Message(Base):
     __tablename__ = "messages"
     id = Column(Integer, primary_key=True)
-    thread_id = Column(String, index=True)
-    role = Column(String)  # "user" | "assistant"
+    thread_id = Column(String, index=True, nullable=False)
+    role = Column(String, nullable=False)   # "user" | "assistant" (puedes migrar a Enum luego)
     content = Column(Text)
-    ts = Column(DateTime, default=datetime.utcnow, index=True)
+    ts = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 class Reservation(Base):
     __tablename__ = "reservations"
     id = Column(Integer, primary_key=True)
-    thread_id = Column(String, index=True)
-    name = Column(String)               # nombre que aparece en la reserva
-    date = Column(String)               # "YYYY-MM-DD"
-    time_start = Column(String)         # "HH:MM"
-    time_end = Column(String)           # "HH:MM"
-    start_iso = Column(String)          # RFC3339 con tz
-    end_iso = Column(String)            # RFC3339 con tz
+    thread_id = Column(String, index=True, nullable=False)
+
+    name = Column(String)      # nombre visible en la reserva
+    date = Column(Date)        # YYYY-MM-DD (tipo date)
+    time_start = Column(Time)  # HH:MM (tipo time)
+    time_end = Column(Time)    # HH:MM (tipo time)
+
+    # En tu tabla quedaron como start_iso/end_iso (timestamptz)
+    start_iso = Column(DateTime(timezone=True), index=True)
+    end_iso = Column(DateTime(timezone=True), index=True)
+
     people = Column(Integer)
-    calendar_id = Column(String)        # tu CALENDAR_ID
-    event_id = Column(String, index=True)  # <-- clave para modificar/cancelar
-    status = Column(String, default="confirmed")  # confirmed | pending | canceled | failed
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    calendar_id = Column(String, index=True)
+    event_id = Column(String, index=True)   # clave para modificar/cancelar
+
+    status = Column(String, default="confirmed")  # confirmed|pending|canceled|failed
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
         UniqueConstraint("calendar_id", "event_id", name="uq_calendar_event"),
     )
 
+# ------------------------------------------------------------
+# INIT (solo crea tablas que no existan; en Supabase ya creaste users/messages/reservations)
+# Puedes dejarlo por si corres localmente con otra DB.
+# ------------------------------------------------------------
 def init_db():
     Base.metadata.create_all(bind=engine)
 
-# Helpers “repo” sencillos
+# ------------------------------------------------------------
+# Session helpers
+# ------------------------------------------------------------
+@contextmanager
+def session_scope():
+    """Context manager para usar sesiones seguras (scripts/CLI)."""
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+# Para frameworks (FastAPI/Flask): generador por-request
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# ------------------------------------------------------------
+# Repos sencillos
+# ------------------------------------------------------------
 def ensure_user(session, thread_id: str, phone: str | None = None, name: str | None = None):
     u = session.query(User).filter_by(thread_id=thread_id).one_or_none()
     if not u:
@@ -67,33 +144,51 @@ def save_message(session, thread_id: str, role: str, content: str):
     session.add(Message(thread_id=thread_id, role=role, content=content))
     session.commit()
 
-def load_history(session, thread_id:str):
-    contents = session.execute(
-    select(Message.content).where(Message.thread_id == thread_id).order_by(Message.ts)
-    ).scalars().all()
-    roles = session.execute(
-        select(Message.role).where(Message.thread_id == thread_id).order_by(Message.ts)
-    ).scalars().all()
-    history=[]
+def load_history(session, thread_id: str, limit: Optional[int] = None):
+    q = session.execute(
+        select(Message.role, Message.content)
+        .where(Message.thread_id == thread_id)
+        .order_by(Message.ts)
+    )
+    rows = q.all()
+    if limit is not None:
+        rows = rows[-limit:]
+    return [{"role": r, "content": c} for (r, c) in rows]
 
-    for role,content in zip(roles,contents):
-        history.append({"role": role, "content": content})
-        
-    return history
-
-def create_reservation(session, *, thread_id, name, date, time_start, time_end,
-                       start_iso, end_iso, people, calendar_id, event_id=None, status="confirmed"):
+def create_reservation(
+    session,
+    *,
+    thread_id: str,
+    name: Optional[str],
+    date: Optional[datetime.date],
+    time_start: Optional[datetime.time],
+    time_end: Optional[datetime.time],
+    start_iso: Optional[datetime],
+    end_iso: Optional[datetime],
+    people: Optional[int],
+    calendar_id: Optional[str],
+    event_id: Optional[str] = None,
+    status: str = "confirmed",
+):
     r = Reservation(
-        thread_id=thread_id, name=name, date=date, time_start=time_start, time_end=time_end,
-        start_iso=start_iso, end_iso=end_iso, people=people, calendar_id=calendar_id,
-        event_id=event_id, status=status
+        thread_id=thread_id,
+        name=name,
+        date=date,
+        time_start=time_start,
+        time_end=time_end,
+        start_iso=start_iso,
+        end_iso=end_iso,
+        people=people,
+        calendar_id=calendar_id,
+        event_id=event_id,
+        status=status,
     )
     session.add(r)
     session.commit()
     return r
 
 def set_reservation_event_id(session, reservation_id: int, event_id: str, status: str = "confirmed"):
-    r = session.query(Reservation).get(reservation_id)
+    r = session.get(Reservation, reservation_id)
     if r:
         r.event_id = event_id
         r.status = status
@@ -106,7 +201,7 @@ def find_reservation_by_event_id(session, event_id: str):
 def list_reservations_by_thread(session, thread_id: str, limit: int = 50):
     return (session.query(Reservation)
             .filter_by(thread_id=thread_id)
-            .order_by(Reservation.created_at.desc())
+            .order_by(desc(Reservation.created_at))
             .limit(limit)
             .all())
 
@@ -115,9 +210,6 @@ def get_last_event_id_by_thread(
     thread_id: str,
     require_confirmed: bool = True
 ) -> Optional[str]:
-    """Devuelve el event_id más reciente (por updated_at/created_at) para el thread dado.
-       Prioriza reservas con status='confirmed' y event_id no-nulo.
-       Si no hay confirmadas y require_confirmed=False, toma la más reciente con event_id."""
     base_q = session.query(Reservation.event_id).filter(
         Reservation.thread_id == thread_id,
         Reservation.event_id.isnot(None)
@@ -129,6 +221,5 @@ def get_last_event_id_by_thread(
         if rec and rec[0]:
             return rec[0]
 
-    # Fallback: cualquiera con event_id
     rec = base_q.order_by(desc(Reservation.updated_at), desc(Reservation.created_at)).first()
     return rec[0] if rec and rec[0] else None
