@@ -12,7 +12,7 @@ vector_store = load_menu_vector(r"C:\Users\cabal\Desktop\Solertia\Solertia_MVP\m
 app = build_app(vector_store)
 
 if __name__ == "__main__":
-    thread_id = "1111"
+    thread_id = "7226443592"
     
     state: GlobalState = {
         "thread_id": thread_id,

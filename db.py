@@ -10,6 +10,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.sql import func
+from sqlalchemy.exc import IntegrityError
 
 # ------------------------------------------------------------
 # Cómo resolvemos la URL de conexión:
@@ -141,6 +142,7 @@ def ensure_user(session, thread_id: str, phone: str | None = None, name: str | N
     return u
 
 def save_message(session, thread_id: str, role: str, content: str):
+    upsert_user(session, thread_id=thread_id)  # <-- garantiza users.row
     session.add(Message(thread_id=thread_id, role=role, content=content))
     session.commit()
 
@@ -223,3 +225,28 @@ def get_last_event_id_by_thread(
 
     rec = base_q.order_by(desc(Reservation.updated_at), desc(Reservation.created_at)).first()
     return rec[0] if rec and rec[0] else None
+
+def upsert_user(session, *, thread_id: str, phone: str | None = None, name: str | None = None):
+    """Crea el usuario si no existe. Si existe y algunos campos están vacíos, los completa.
+       No hace override de valores ya existentes (solo rellena None/'' )."""
+    u = session.query(User).filter_by(thread_id=thread_id).one_or_none()
+    if not u:
+        u = User(thread_id=thread_id, phone=phone, name=name)
+        session.add(u)
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            # carrera rara: otro proceso insertó; vuelve a leer
+            u = session.query(User).filter_by(thread_id=thread_id).one()
+    else:
+        updated = False
+        if (not u.phone) and phone:
+            u.phone = phone
+            updated = True
+        if (not u.name) and name:
+            u.name = name
+            updated = True
+        if updated:
+            session.commit()
+    return u

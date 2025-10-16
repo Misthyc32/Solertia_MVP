@@ -10,7 +10,7 @@ import json
 from config import TZ
 from calendar_client import get_calendar_service
 from zoneinfo import ZoneInfo
-from db import SessionLocal, create_reservation
+from db import SessionLocal, create_reservation, upsert_user
 # Normalizar “hoy/mañana/sábado” → YYYY-MM-DD
 from dateutil.relativedelta import relativedelta, MO, TU, WE, TH, FR, SA, SU
 import re
@@ -221,135 +221,161 @@ No agregues texto fuera del JSON.
 Mensaje:
 {m}
 """)
+
 def reservation_node(state: GlobalState):
     """Nodo que maneja el flujo de creación de reserva con:
     - Normalización fecha/hora
     - Manejo de cruce a medianoche
     - Validación
     - Extracción robusta de JSON
-    - Persistencia en DB y llamada a Calendar
+    - Persistencia en DB (Supabase) y llamada a Calendar
     """
-    # marcar modo “pegajoso” de reserva
+    # 0) Marcar modo “pegajoso” de reserva
     if not state.get("pending_reservation"):
         state["pending_reservation"] = True
 
     db = SessionLocal()
-    today = dt.datetime.now(ZoneInfo(TZ)).date().isoformat()
-
-    # 1) Pedimos/normalizamos datos con el LLM (JSON-only cuando esté completo)
-    convo = (
-        [{"role": "system", "content": reservation_prompt.format(today=today, tz=TZ)}]
-        + state["messages"]
-        + [{"role": "user", "content": state["question"]}]
-    )
-    resp = llm.invoke(convo)
-    raw = resp.content.strip()
-
-    # 2) Intentamos obtener JSON (directo → tolerante → rescate)
-    appt = None
     try:
-        appt = json.loads(raw)
-    except Exception:
-        pass
+        today = dt.datetime.now(ZoneInfo(TZ)).date().isoformat()
 
-    if appt is None:
-        appt = _extract_json_forgiving(raw)
+        # 1) Pedimos/normalizamos datos con el LLM (JSON-only cuando esté completo)
+        convo = (
+            [{"role": "system", "content": reservation_prompt.format(today=today, tz=TZ)}]
+            + state["messages"]
+            + [{"role": "user", "content": state["question"]}]
+        )
+        resp = llm.invoke(convo)
+        raw = (resp.content or "").strip()
 
-    if appt is None:
-        rescue = llm.invoke(extract_prompt.format(m=raw)).content.strip()
+        # 2) Intentamos obtener JSON (directo → tolerante → rescate)
+        appt = None
         try:
-            appt = json.loads(rescue)
+            appt = json.loads(raw)
         except Exception:
-            appt = None
+            pass
 
-    if appt is None:
-        # seguimos conversación (no hay JSON aún)
-        followup = raw
+        if appt is None:
+            appt = _extract_json_forgiving(raw)
+
+        if appt is None:
+            rescue = llm.invoke(extract_prompt.format(m=raw)).content.strip()
+            try:
+                appt = json.loads(rescue)
+            except Exception:
+                appt = None
+
+        if appt is None:
+            # seguimos conversación (no hay JSON aún)
+            followup = raw
+            updated_messages = _roll_messages(
+                state["messages"] + [
+                    {"role": "user", "content": state["question"]},
+                    {"role": "assistant", "content": followup},
+                ]
+            )
+            return {**state, "answer": followup, "messages": updated_messages}
+
+        # 3) Completar/normalizar/validar
+        for k in ["name", "date", "time_start", "people"]:
+            if k not in appt or appt[k] in (None, "", []):
+                raise ValueError(f"Falta campo obligatorio: {k}")
+
+        # Si falta hora de fin, colocar 2h por defecto
+        if not appt.get("time_end"):
+            t0 = dt.datetime.strptime(appt["time_start"], "%H:%M")
+            t1 = (t0 + dt.timedelta(hours=2)).time()
+            appt["time_end"] = t1.strftime("%H:%M")
+
+        # Normalizar fecha en español y coherencia de fin al día siguiente si corresponde
+        appt["date"] = _normalize_date_es(appt["date"], tz=TZ)
+        _coerce_end_next_day_if_needed(appt)  # maneja “00:00” o fin <= inicio
+        _validate_reservation(appt, tz=TZ)
+
+        # 4) RFC3339 con tz (usa date_end si existe)
+        start_iso_str = _combine_date_time_to_rfc3339(appt["date"],     appt["time_start"], tz=TZ)
+        end_iso_str   = _combine_date_time_to_rfc3339(appt.get("date_end", appt["date"]), appt["time_end"], tz=TZ)
+
+        # Convertir a datetime aware (por si la DB usa timestamptz)
+        # Maneja "Z" -> "+00:00" si fuera necesario
+        start_iso_str = start_iso_str.replace("Z", "+00:00")
+        end_iso_str   = end_iso_str.replace("Z", "+00:00")
+        start_dt = dt.datetime.fromisoformat(start_iso_str)
+        end_dt   = dt.datetime.fromisoformat(end_iso_str)
+
+        # 5) Tool → Calendar
+        tool_result = reserva_restaurante_tool.invoke({
+            "name": appt["name"],
+            "start_datetime": start_iso_str,
+            "end_datetime": end_iso_str,
+            "num_people": int(appt["people"]),
+            "des": appt.get("des", "")
+        })
+
+        # 6) Extraer event_id (si vino)
+        event_id = None
+        if "|EVENT_ID:" in tool_result:
+            _, eid = tool_result.split("|EVENT_ID:", 1)
+            event_id = eid.strip()
+
+        # 7) Asegurar usuario y Persistir en DB SIEMPRE
+        #    Usa datos del estado si existen; de lo contrario, rellena con lo que viene del appt
+        upsert_user(
+            db,
+            thread_id=state["thread_id"],
+            phone=state.get("phone"),
+            name=state.get("user_name") or appt.get("name"),
+        )
+
+        # Parse a tipos fuertes para columnas Postgres (date, time)
+        date_obj = dt.date.fromisoformat(appt["date"])        # 'YYYY-MM-DD'
+        t_start = dt.datetime.strptime(appt["time_start"], "%H:%M").time()
+        t_end   = dt.datetime.strptime(appt["time_end"], "%H:%M").time()
+
+        status = "confirmed" if event_id else ("failed" if tool_result.startswith("❌") else "pending")
+        rec = create_reservation(
+            db,
+            thread_id=state["thread_id"],
+            name=appt["name"],
+            date=date_obj,
+            time_start=t_start,
+            time_end=t_end,
+            start_iso=start_dt,
+            end_iso=end_dt,
+            people=int(appt["people"]),
+            calendar_id=CALENDAR_ID,
+            event_id=event_id,
+            status=status
+        )
+
+        # 8) Mensaje humano
+        crosses_day = (appt.get("date_end") and appt["date_end"] != appt["date"])
+        human_msg = (
+            f"¡Listo, {appt['name']}! Tu reservación para el {appt['date']}"
+            f"{' (termina al día siguiente)' if crosses_day else ''} "
+            f"de {appt['time_start']} a {appt['time_end']} para {appt['people']} personas. "
+            f"{tool_result}"
+        )
+
         updated_messages = _roll_messages(
             state["messages"] + [
                 {"role": "user", "content": state["question"]},
-                {"role": "assistant", "content": followup},
+                {"role": "assistant", "content": human_msg},
             ]
         )
-        return {**state, "answer": followup, "messages": updated_messages}
 
-    # 3) Completar/normalizar/validar
-    for k in ["name", "date", "time_start", "people"]:
-        if k not in appt or appt[k] in (None, "", []):
-            raise ValueError(f"Falta campo obligatorio: {k}")
+        # salir de modo pegajoso si ya quedó confirmada
+        if event_id:
+            state["pending_reservation"] = False
 
-    if not appt.get("time_end"):
-        t0 = dt.datetime.strptime(appt["time_start"], "%H:%M")
-        t1 = (t0 + dt.timedelta(hours=2)).time()
-        appt["time_end"] = t1.strftime("%H:%M")
+        return {
+            **state,
+            "answer": human_msg,
+            "messages": updated_messages,
+            "reservation_data": {**appt, "eventId": event_id, "db_id": rec.id}
+        }
 
-    appt["date"] = _normalize_date_es(appt["date"], tz=TZ)
-    _coerce_end_next_day_if_needed(appt)  # <-- maneja “00:00” o fin <= inicio
-    _validate_reservation(appt, tz=TZ)
-
-    # 4) RFC3339 con tz (usa date_end si existe)
-    start_iso = _combine_date_time_to_rfc3339(appt["date"],     appt["time_start"], tz=TZ)
-    end_iso   = _combine_date_time_to_rfc3339(appt.get("date_end", appt["date"]), appt["time_end"], tz=TZ)
-
-    # 5) Tool → Calendar
-    tool_result = reserva_restaurante_tool.invoke({
-        "name": appt["name"],
-        "start_datetime": start_iso,
-        "end_datetime": end_iso,
-        "num_people": int(appt["people"]),
-        "des": appt.get("des", "")
-
-    })
-
-    # 6) Extraer event_id (si vino)
-    event_id = None
-    if "|EVENT_ID:" in tool_result:
-        _, eid = tool_result.split("|EVENT_ID:", 1)
-        event_id = eid.strip()
-
-    # 7) Persistir en DB SIEMPRE
-    status = "confirmed" if event_id else ("failed" if tool_result.startswith("❌") else "pending")
-    rec = create_reservation(
-        db,
-        thread_id=state["thread_id"],
-        name=appt["name"],
-        date=appt["date"],
-        time_start=appt["time_start"],
-        time_end=appt["time_end"],
-        start_iso=start_iso,
-        end_iso=end_iso,
-        people=int(appt["people"]),
-        calendar_id=CALENDAR_ID,
-        event_id=event_id,
-        status=status
-    )
-
-    # 8) Mensaje humano
-    human_msg = (
-        f"¡Listo, {appt['name']}! Tu reservación para el {appt['date']}"
-        f"{' (termina al día siguiente)' if appt.get('date_end') and appt['date_end'] != appt['date'] else ''} "
-        f"de {appt['time_start']} a {appt['time_end']} para {appt['people']} personas. "
-        f"{tool_result}"
-    )
-
-    updated_messages = _roll_messages(
-        state["messages"] + [
-            {"role": "user", "content": state["question"]},
-            {"role": "assistant", "content": human_msg},
-        ]
-    )
-
-    # salir de modo pegajoso si ya quedó confirmada
-    if event_id:
-        state["pending_reservation"] = False
-
-    return {
-        **state,
-        "answer": human_msg,
-        "messages": updated_messages,
-        "reservation_data": {**appt, "eventId": event_id, "db_id": rec.id}
-    }
-
+    finally:
+        db.close()
 def update_node(state: GlobalState):
     if not state.get("pending_update"):
         state["pending_update"] = True
@@ -489,20 +515,6 @@ def update_node(state: GlobalState):
         "messages": updated_messages,
         "reservation_data": new_reservation_cache
     }
-# def build_app(vector_store):
-#     g = StateGraph(GlobalState)
-#     g.set_entry_point("classifier")
-#     g.add_node("classifier", classifier_node)
-#     g.add_node("retrieve", lambda s: retrieve(s, vector_store))
-#     g.add_node("generate", generate)
-#     g.add_node("reservation_node", reservation_node)
-#     g.add_node("output", lambda s: {**s})
-#     g.add_conditional_edges("classifier", classifier_router)
-#     g.add_edge("retrieve", "generate")
-#     g.add_edge("generate", "output")
-#     g.add_edge("reservation_node", "output")
-#     g.set_finish_point("output")
-#     return g.compile(checkpointer=MemorySaver())
 def build_app(vector_store):
     g = StateGraph(GlobalState)
     g.set_entry_point("classifier")
