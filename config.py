@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 # Carga de variables de entorno
-load_dotenv(r"C:\Users\cabal\Desktop\startup\Selling_Agent\.env")
+load_dotenv(r"C:\Users\cabal\Desktop\Solertia\Solertia_MVP\.env")
 
 # Configuración general
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
