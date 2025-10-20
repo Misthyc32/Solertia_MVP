@@ -8,7 +8,6 @@ from tools import CALENDAR_ID, reserva_restaurante_tool, update_reservation_tool
 import datetime as dt
 import json
 from config import TZ
-from calendar_client import get_calendar_service
 from zoneinfo import ZoneInfo
 from db import SessionLocal, create_reservation, upsert_user
 # Normalizar “hoy/mañana/sábado” → YYYY-MM-DD
@@ -19,7 +18,6 @@ WEEKDAYS = {
     "lunes": MO, "martes": TU, "miércoles": WE, "miercoles": WE,
     "jueves": TH, "viernes": FR, "sábado": SA, "sabado": SA, "domingo": SU
 }
-db = SessionLocal()
 
 llm = init_chat_model("gpt-4o-mini", model_provider="openai")
 
@@ -380,141 +378,208 @@ def update_node(state: GlobalState):
     if not state.get("pending_update"):
         state["pending_update"] = True
 
-    today = dt.datetime.now(ZoneInfo(TZ)).date().isoformat()
-
-    # Resolver event_id solo desde DB o cache
-    event_id = _resolve_event_id_db_cache(state)
-    if not event_id:
-        follow = "No encuentro tu reservación en nuestro sistema. Por favor, confirma si ya hiciste una previamente o indícame que la creemos de nuevo."
-        updated_messages = _roll_messages(
-            state["messages"] + [
-                {"role": "user", "content": state["question"]},
-                {"role": "assistant", "content": follow},
-            ]
-        )
-        return {**state, "answer": follow, "messages": updated_messages}
-
-    # Preguntar/extraer JSON con cambios a aplicar
-    convo = (
-        [{"role": "system", "content": update_prompt.format(today=today, tz=TZ)}]
-        + state["messages"]
-        + [{"role": "user", "content": state["question"]}]
-    )
-    resp = llm.invoke(convo)
-    raw = resp.content.strip()
-
-    # Intento robusto de JSON
-    upd = None
+    db = SessionLocal()
     try:
-        upd = json.loads(raw)
-    except Exception:
-        upd = _extract_json_forgiving(raw)
-        if upd is None:
-            rescue = llm.invoke(extract_prompt.format(m=raw)).content.strip()
-            try:
-                upd = json.loads(rescue)
-            except Exception:
-                upd = None
+        today = dt.datetime.now(ZoneInfo(TZ)).date().isoformat()
 
-    # Si aún no hay JSON, seguimos la conversación con lo que dijo el modelo
-    if upd is None:
+        # Resolver event_id solo desde DB o cache
+        event_id = _resolve_event_id_db_cache(state)
+        if not event_id:
+            follow = "No encuentro tu reservación en nuestro sistema. Por favor, confirma si ya hiciste una previamente o indícame que la creemos de nuevo."
+            updated_messages = _roll_messages(
+                state["messages"] + [
+                    {"role": "user", "content": state["question"]},
+                    {"role": "assistant", "content": follow},
+                ]
+            )
+            return {**state, "answer": follow, "messages": updated_messages}
+
+        # Preguntar/extraer JSON con cambios a aplicar
+        convo = (
+            [{"role": "system", "content": update_prompt.format(today=today, tz=TZ)}]
+            + state["messages"]
+            + [{"role": "user", "content": state["question"]}]
+        )
+        resp = llm.invoke(convo)
+        raw = resp.content.strip()
+
+        # Intento robusto de JSON
+        upd = None
+        try:
+            upd = json.loads(raw)
+        except Exception:
+            upd = _extract_json_forgiving(raw)
+            if upd is None:
+                rescue = llm.invoke(extract_prompt.format(m=raw)).content.strip()
+                try:
+                    upd = json.loads(rescue)
+                except Exception:
+                    upd = None
+
+        # Si aún no hay JSON, seguimos la conversación con lo que dijo el modelo
+        if upd is None:
+            updated_messages = _roll_messages(
+                state["messages"] + [
+                    {"role": "user", "content": state["question"]},
+                    {"role": "assistant", "content": raw},
+                ]
+            )
+            return {**state, "answer": raw, "messages": updated_messages}
+
+        # Normalización suave (solo campos presentes)
+        norm = {}
+        if upd.get("name"):
+            norm["name"] = upd["name"]
+        if upd.get("people") is not None:
+            norm["people"] = int(upd["people"])
+        if upd.get("des") is not None:
+            norm["des"] = str(upd["des"])
+
+        # Manejo de fecha/hora si están presentes
+        date_str = upd.get("date")
+        t0 = upd.get("time_start")
+        t1 = upd.get("time_end")
+
+        start_iso = None
+        end_iso = None
+
+        if date_str:
+            date_str = _normalize_date_es(date_str, tz=TZ)
+
+        if t0 and not t1:
+            base = dt.datetime.strptime(t0, "%H:%M")
+            t1 = (base + dt.timedelta(hours=2)).strftime("%H:%M")
+
+        if date_str and t0:
+            appt_tmp = {
+                "date": date_str,
+                "time_start": t0,
+                "time_end": t1 or "00:00",
+            }
+            _coerce_end_next_day_if_needed(appt_tmp)
+            _validate_reservation(appt_tmp, tz=TZ)
+
+            start_iso = _combine_date_time_to_rfc3339(appt_tmp["date"], t0, tz=TZ)
+            end_iso   = _combine_date_time_to_rfc3339(appt_tmp.get("date_end", appt_tmp["date"]), appt_tmp["time_end"], tz=TZ)
+
+        # Llamada a la tool de actualización
+        tool_res = update_reservation_tool.invoke({
+            "event_id": event_id,
+            "name": norm.get("name"),
+            "num_people": norm.get("people"),
+            "des": norm.get("des"),
+            "start_datetime": start_iso,
+            "end_datetime": end_iso,
+            "tz": TZ
+        })
+
+        # Si la tool devolvió un nuevo EVENT_ID, úsalo; si no, conserva el actual
+        new_event_id = event_id
+        if isinstance(tool_res, str) and "|EVENT_ID:" in tool_res:
+            try:
+                _, eid = tool_res.split("|EVENT_ID:", 1)
+                if eid.strip():
+                    new_event_id = eid.strip()
+            except Exception:
+                pass
+
+        # ACTUALIZAR LA BASE DE DATOS POSTGRESQL
+        from db import find_reservation_by_event_id
+        
+        # Buscar la reservación en la DB por event_id
+        reservation = find_reservation_by_event_id(db, event_id)
+        
+        if reservation:
+            # Actualizar solo los campos que cambiaron
+            updated_fields = []
+            
+            if norm.get("name") and norm["name"] != reservation.name:
+                reservation.name = norm["name"]
+                updated_fields.append("name")
+                
+            if norm.get("people") is not None and norm["people"] != reservation.people:
+                reservation.people = norm["people"]
+                updated_fields.append("people")
+                
+            if date_str and t0:
+                # Actualizar fechas y horas
+                new_date_obj = dt.date.fromisoformat(date_str)
+                new_time_start = dt.datetime.strptime(t0, "%H:%M").time()
+                new_time_end = dt.datetime.strptime(appt_tmp["time_end"], "%H:%M").time()
+                
+                if new_date_obj != reservation.date:
+                    reservation.date = new_date_obj
+                    updated_fields.append("date")
+                    
+                if new_time_start != reservation.time_start:
+                    reservation.time_start = new_time_start
+                    updated_fields.append("time_start")
+                    
+                if new_time_end != reservation.time_end:
+                    reservation.time_end = new_time_end
+                    updated_fields.append("time_end")
+                
+                # Actualizar timestamps ISO
+                if start_iso:
+                    start_dt = dt.datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+                    reservation.start_iso = start_dt
+                    updated_fields.append("start_iso")
+                    
+                if end_iso:
+                    end_dt = dt.datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+                    reservation.end_iso = end_dt
+                    updated_fields.append("end_iso")
+            
+            # Actualizar el event_id si cambió
+            if new_event_id != event_id:
+                reservation.event_id = new_event_id
+                updated_fields.append("event_id")
+            
+            # Actualizar timestamp de modificación
+            if updated_fields:
+                reservation.updated_at = dt.datetime.now(ZoneInfo(TZ))
+                db.commit()
+                print(f"Database updated for reservation {reservation.id}: {', '.join(updated_fields)}")
+            else:
+                print("No database fields needed updating")
+        else:
+            print(f"Warning: Could not find reservation with event_id {event_id} in database")
+
+        # Mensaje humano
+        human_msg = f"¡Listo! Tu reservación ha sido actualizada. {tool_res}"
+
         updated_messages = _roll_messages(
             state["messages"] + [
                 {"role": "user", "content": state["question"]},
-                {"role": "assistant", "content": raw},
+                {"role": "assistant", "content": human_msg},
             ]
         )
-        return {**state, "answer": raw, "messages": updated_messages}
 
-    # Normalización suave (solo campos presentes)
-    norm = {}
-    if upd.get("name"):
-        norm["name"] = upd["name"]
-    if upd.get("people") is not None:
-        norm["people"] = int(upd["people"])
-    if upd.get("des") is not None:
-        norm["des"] = str(upd["des"])
+        # Salimos de modo update
+        state["pending_update"] = False
 
-    # Manejo de fecha/hora si están presentes
-    date_str = upd.get("date")
-    t0 = upd.get("time_start")
-    t1 = upd.get("time_end")
+        # Actualiza cache local si cambió algo
+        new_reservation_cache = dict(state.get("reservation_data", {}))
+        if new_event_id:
+            new_reservation_cache["eventId"] = new_event_id
+        if date_str and t0:
+            new_reservation_cache.update({
+                "date": date_str,
+                "time_start": t0,
+                "time_end": appt_tmp["time_end"],
+            })
+            if appt_tmp.get("date_end"):
+                new_reservation_cache["date_end"] = appt_tmp["date_end"]
 
-    start_iso = None
-    end_iso = None
-
-    if date_str:
-        date_str = _normalize_date_es(date_str, tz=TZ)
-
-    if t0 and not t1:
-        base = dt.datetime.strptime(t0, "%H:%M")
-        t1 = (base + dt.timedelta(hours=2)).strftime("%H:%M")
-
-    if date_str and t0:
-        appt_tmp = {
-            "date": date_str,
-            "time_start": t0,
-            "time_end": t1 or "00:00",
+        return {
+            **state,
+            "answer": human_msg,
+            "messages": updated_messages,
+            "reservation_data": new_reservation_cache
         }
-        _coerce_end_next_day_if_needed(appt_tmp)
-        _validate_reservation(appt_tmp, tz=TZ)
-
-        start_iso = _combine_date_time_to_rfc3339(appt_tmp["date"], t0, tz=TZ)
-        end_iso   = _combine_date_time_to_rfc3339(appt_tmp.get("date_end", appt_tmp["date"]), appt_tmp["time_end"], tz=TZ)
-
-    # Llamada a la tool de actualización
-    tool_res = update_reservation_tool.invoke({
-        "event_id": event_id,
-        "name": norm.get("name"),
-        "num_people": norm.get("people"),
-        "des": norm.get("des"),
-        "start_datetime": start_iso,
-        "end_datetime": end_iso,
-        "tz": TZ
-    })
-
-    # Si la tool devolvió un nuevo EVENT_ID, úsalo; si no, conserva el actual
-    new_event_id = event_id
-    if isinstance(tool_res, str) and "|EVENT_ID:" in tool_res:
-        try:
-            _, eid = tool_res.split("|EVENT_ID:", 1)
-            if eid.strip():
-                new_event_id = eid.strip()
-        except Exception:
-            pass
-
-    # Mensaje humano
-    human_msg = f"¡Listo! Tu reservación ha sido actualizada. {tool_res}"
-
-    updated_messages = _roll_messages(
-        state["messages"] + [
-            {"role": "user", "content": state["question"]},
-            {"role": "assistant", "content": human_msg},
-        ]
-    )
-
-    # Salimos de modo update
-    state["pending_update"] = False
-
-    # Actualiza cache local si cambió algo
-    new_reservation_cache = dict(state.get("reservation_data", {}))
-    if new_event_id:
-        new_reservation_cache["eventId"] = new_event_id
-    if date_str and t0:
-        new_reservation_cache.update({
-            "date": date_str,
-            "time_start": t0,
-            "time_end": appt_tmp["time_end"],
-        })
-        if appt_tmp.get("date_end"):
-            new_reservation_cache["date_end"] = appt_tmp["date_end"]
-
-    return {
-        **state,
-        "answer": human_msg,
-        "messages": updated_messages,
-        "reservation_data": new_reservation_cache
-    }
+    
+    finally:
+        db.close()
 def build_app(vector_store):
     g = StateGraph(GlobalState)
     g.set_entry_point("classifier")

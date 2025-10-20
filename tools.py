@@ -3,7 +3,6 @@ from langchain.tools import tool
 from calendar_client import get_calendar_service, create_event, update_event
 from config import TZ
 import datetime as dt
-import json
 from typing import Optional
 from db import SessionLocal, get_last_event_id_by_thread
 
