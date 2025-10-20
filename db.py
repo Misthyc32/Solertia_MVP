@@ -1,6 +1,5 @@
 # db.py
 import os
-from contextlib import contextmanager
 from typing import Optional
 from datetime import datetime
 
@@ -107,39 +106,8 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
 # ------------------------------------------------------------
-# Session helpers
-# ------------------------------------------------------------
-@contextmanager
-def session_scope():
-    """Context manager para usar sesiones seguras (scripts/CLI)."""
-    session = SessionLocal()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-
-# Para frameworks (FastAPI/Flask): generador por-request
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# ------------------------------------------------------------
 # Repos sencillos
 # ------------------------------------------------------------
-def ensure_user(session, thread_id: str, phone: str | None = None, name: str | None = None):
-    u = session.query(User).filter_by(thread_id=thread_id).one_or_none()
-    if not u:
-        u = User(thread_id=thread_id, phone=phone, name=name)
-        session.add(u)
-        session.commit()
-    return u
 
 def save_message(session, thread_id: str, role: str, content: str):
     upsert_user(session, thread_id=thread_id)  # <-- garantiza users.row

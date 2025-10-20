@@ -35,9 +35,6 @@ def create_event(service, calendar_id, summary, description, start_iso, end_iso,
     }
     return service.events().insert(calendarId=calendar_id, body=body).execute()
 
-def list_calendars(service):
-    resp = service.calendarList().list().execute()
-    return [(it["summary"], it["id"]) for it in resp.get("items", [])]
 
 def update_event(service, calendar_id, event_id, summary: str | None = None, description: str | None = None, start_iso: str | None = None, end_iso: str | None = None, tz: str = TZ):
     event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
