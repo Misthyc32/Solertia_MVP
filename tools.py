@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, validator
 from langchain.tools import tool
-from calendar_client import get_calendar_service, create_event, update_event
+from calendar_client import get_calendar_service, create_event, update_event, generate_calendar_invitation_link
 from config import TZ
 import datetime as dt
 from typing import Optional
@@ -33,17 +33,31 @@ class ReservaUpdateInput(BaseModel):
 
 @tool("reserva_restaurante", args_schema=ReservaInput, return_direct=True)
 def reserva_restaurante_tool(name: str, start_datetime: str, end_datetime: str, num_people: int, des:str) -> str:
-    """Crea una reservación en el calendario del restaurante y devuelve un link + event_id."""
+    """Crea una reservación en el calendario del restaurante y devuelve un link + event_id + invitation links."""
     service = get_calendar_service()
     summary = f"Reservación: {name} ({num_people} personas)"
     description = f"Reservación para {num_people} personas. Creada por el agente. {des}"
     try:
+        # Create event in restaurant calendar
         ev = create_event(service, CALENDAR_ID, summary, description, start_datetime, end_datetime, tz=TZ)
-        link = ev.get("htmlLink", "")
-        eid  = ev.get("id", "")
-        return f"Reservación creada: {link}|EVENT_ID:{eid}"
+        restaurant_link = ev.get("htmlLink", "")
+        eid = ev.get("id", "")
+        
+        # Generate invitation links for the user
+        invitation_links = generate_calendar_invitation_link(summary, start_datetime, end_datetime, name, num_people, des, tz=TZ)
+        
+        # Format the response with both restaurant link and invitation links
+        response = f"✅ Reservación creada exitosamente!\n\n"
+        response += f"📅 **Vista en nuestro calendario:** {restaurant_link}\n\n"
+        response += f"📱 **Agregar a tu calendario:**\n"
+        response += f"• Google Calendar: {invitation_links['google']}\n"
+        response += f"• Outlook/Hotmail: {invitation_links['outlook']}\n"
+        response += f"• Apple Calendar: {invitation_links['apple']}\n\n"
+        response += f"Event ID: {eid}"
+        
+        return f"{response}|EVENT_ID:{eid}"
     except Exception as e:
-        return f"Error al crear la reservación: {e}"
+        return f"❌ Error al crear la reservación: {e}"
 
 @tool("update_reserva_restaurante", args_schema=ReservaUpdateInput, return_direct=True)
 def update_reservation_tool(event_id: str,name: Optional[str] = None,num_people: Optional[int] = None,des: Optional[str] = None,start_datetime: Optional[str] = None,end_datetime: Optional[str] = None,tz: Optional[str] = None
@@ -94,10 +108,33 @@ def update_reservation_tool(event_id: str,name: Optional[str] = None,num_people:
             tz=tz_effective,
         )
 
-        link = ev.get("htmlLink", "")
-        eid  = ev.get("id", event_id)
+        restaurant_link = ev.get("htmlLink", "")
+        eid = ev.get("id", event_id)
+        
+        # Generate new invitation links for the updated event
+        updated_summary = ev.get("summary", f"Reservación actualizada")
+        updated_start = ev.get("start", {}).get("dateTime", start_datetime)
+        updated_end = ev.get("end", {}).get("dateTime", end_datetime)
+        
+        # Extract name and people from the updated summary or use defaults
+        updated_name = name if name else "Cliente"
+        updated_people = num_people if num_people else 2
+        updated_des = des if des else ""
+        
+        invitation_links = generate_calendar_invitation_link(
+            updated_summary, updated_start, updated_end, updated_name, updated_people, updated_des, tz_effective
+        )
+        
+        # Format the response with both restaurant link and invitation links
+        response = f"✅ Reservación actualizada exitosamente!\n\n"
+        response += f"📅 **Vista en nuestro calendario:** {restaurant_link}\n\n"
+        response += f"📱 **Agregar a tu calendario actualizado:**\n"
+        response += f"• Google Calendar: {invitation_links['google']}\n"
+        response += f"• Outlook/Hotmail: {invitation_links['outlook']}\n"
+        response += f"• Apple Calendar: {invitation_links['apple']}\n\n"
+        response += f"Event ID: {eid}"
 
-        return f"Reservación actualizada: {link}|EVENT_ID:{eid}"
+        return f"{response}|EVENT_ID:{eid}"
 
     except Exception as e:
         return f"Error al actualizar la reservación: {e}"
