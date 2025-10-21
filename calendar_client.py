@@ -35,6 +35,81 @@ def create_event(service, calendar_id, summary, description, start_iso, end_iso,
     }
     return service.events().insert(calendarId=calendar_id, body=body).execute()
 
+def generate_calendar_invitation_link(summary, start_iso, end_iso, name, num_people, des="", tz=TZ):
+    """
+    Generates a calendar invitation link that users can add to their own calendar.
+    Creates links for Google Calendar, Outlook, and Apple Calendar.
+    """
+    import urllib.parse
+    import datetime as dt
+    
+    # Parse the ISO datetime strings properly
+    start_dt = dt.datetime.fromisoformat(start_iso.replace('Z', '+00:00'))
+    end_dt = dt.datetime.fromisoformat(end_iso.replace('Z', '+00:00'))
+    
+    # Convert to UTC for Google Calendar (required format)
+    start_utc = start_dt.astimezone(dt.timezone.utc)
+    end_utc = end_dt.astimezone(dt.timezone.utc)
+    
+    # Format for Google Calendar (YYYYMMDDTHHMMSSZ)
+    start_google = start_utc.strftime('%Y%m%dT%H%M%SZ')
+    end_google = end_utc.strftime('%Y%m%dT%H%M%SZ')
+    
+    # Format for ICS (YYYYMMDDTHHMMSS)
+    start_ics = start_utc.strftime('%Y%m%dT%H%M%S')
+    end_ics = end_utc.strftime('%Y%m%dT%H%M%S')
+    dtstamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    
+    # Create client-friendly description (simple and nice)
+    client_summary = f"Reservación en La Casona"
+    client_description = f"Tienes una reservación en La Casona para {num_people} personas"
+    if des:
+        client_description += f"\n\nNotas: {des}"
+    
+    # Google Calendar link
+    google_params = {
+        'action': 'TEMPLATE',
+        'text': client_summary,
+        'dates': f"{start_google}/{end_google}",
+        'details': client_description,
+        'location': 'La Casona Restaurant'
+    }
+    google_link = f"https://calendar.google.com/calendar/render?{urllib.parse.urlencode(google_params)}"
+    
+    # Outlook/Hotmail link
+    outlook_params = {
+        'subject': client_summary,
+        'startdt': start_iso,
+        'enddt': end_iso,
+        'body': client_description,
+        'location': 'La Casona Restaurant'
+    }
+    outlook_link = f"https://outlook.live.com/calendar/0/deeplink/compose?{urllib.parse.urlencode(outlook_params)}"
+    
+    # Apple Calendar (ICS file) - properly formatted
+    ics_content = f"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//La Casona//Restaurant Booking//EN
+BEGIN:VEVENT
+UID:{name.replace(' ', '_').replace(':', '_')}@lacasona.com
+DTSTAMP:{dtstamp}
+DTSTART:{start_ics}
+DTEND:{end_ics}
+SUMMARY:{client_summary}
+DESCRIPTION:{client_description}
+LOCATION:La Casona Restaurant
+END:VEVENT
+END:VCALENDAR"""
+    
+    ics_data = urllib.parse.quote(ics_content)
+    apple_link = f"data:text/calendar;charset=utf8,{ics_data}"
+    
+    return {
+        "google": google_link,
+        "outlook": outlook_link,
+        "apple": apple_link
+    }
+
 
 def update_event(service, calendar_id, event_id, summary: str | None = None, description: str | None = None, start_iso: str | None = None, end_iso: str | None = None, tz: str = TZ):
     event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
