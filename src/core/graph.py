@@ -4,12 +4,12 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.documents import Document
 from langchain.prompts import ChatPromptTemplate
 from langchain.chat_models import init_chat_model
-from tools import CALENDAR_ID, reserva_restaurante_tool, update_reservation_tool, get_last_event_id_tool  
+from src.core.tools import CALENDAR_ID, reserva_restaurante_tool, update_reservation_tool, get_last_event_id_tool  
 import datetime as dt
 import json
-from config import TZ
+from src.core.config import TZ
 from zoneinfo import ZoneInfo
-from db import SessionLocal, create_reservation, upsert_user
+from src.core.db import SessionLocal, create_reservation, upsert_user
 # Normalizar “hoy/mañana/sábado” → YYYY-MM-DD
 from dateutil.relativedelta import relativedelta, MO, TU, WE, TH, FR, SA, SU
 import re
@@ -22,7 +22,7 @@ WEEKDAYS = {
 llm = init_chat_model("gpt-4o-mini", model_provider="openai")
 
 class GlobalState(TypedDict):
-    thread_id: str
+    customer_id: str
     messages: List[dict]
     question: str
     context: List[Document]
@@ -39,11 +39,13 @@ Hablas de manera cálida y natural, como un mesero amable.
 
 Tu trabajo es agendar una reservación para el cliente. Necesitas estos datos:
 - name (Nombre del cliente)
-- date (YYYY-MM-DD o expresiones como "mañana", "hoy", "sábado")
+- date (YYYY-MM-DD o expresiones como "mañana", "pasado mañana", "hoy", o día de la semana como "viernes", "sábado" que significa el próximo ese día)
 - time_start (HH:MM en formato 24h, por ejemplo "20:00")
 - time_end (HH:MM en formato 24h). Si no lo dan, asume 2 horas después.
 - people (número entero de personas)
 - des (Información necesaria extra para la reserva, ej. alergias, cumpleaños, celebraciones, algún dato importante)
+
+IMPORTANTE sobre fechas: Si el cliente dice "viernes", "sábado", etc., significa el PRÓXIMO día de esa semana que sea hoy o después. Si hoy es lunes y dicen "viernes", significa el viernes de esta semana (no el de la próxima semana).
   
 Si todavía falta algún dato, haz UNA SOLA pregunta NATURAL para pedirlo (sin listas ni formatos).
 Cuando ya tengas todos los datos, responde **exclusivamente** con un JSON **sin texto adicional**, exactamente con este formato:
@@ -89,10 +91,19 @@ No pongas explicaciones ni texto adicional fuera del JSON.
 """
 )
 classifier_prompt = ChatPromptTemplate.from_template(
-    """You are a classifier. Classify the following message as one of two categories:
-- "reservation" for booking/scheduling/mesa
-- "update" for modifying/changing an existing reservation (cambiar hora, personas, etc.)
-- "rag" for menu questions or recommendations.
+    """You are a classifier for a restaurant assistant. Classify the following message as one of three categories:
+
+- "reservation" for booking/scheduling/reserving a table (reservar, mesa, cita, agendar, reservación, reserva, quiero ir, necesito mesa, etc.)
+- "update" for modifying/changing an existing reservation (cambiar hora, personas, modificar, actualizar, etc.)
+- "rag" for menu questions, recommendations, or general restaurant information
+
+Examples:
+- "Quiero hacer una reservación" → reservation
+- "Reservar mesa para 4 personas" → reservation
+- "Necesito una mesa" → reservation
+- "¿Qué platillos tienen?" → rag
+- "Recomiéndame algo" → rag
+- "Cambiar mi reserva" → update
 
 Respond only with: reservation or update or rag.
 
@@ -100,16 +111,63 @@ Message: {message}"""
 )
 
 def classifier_node(state: GlobalState):
-    # Si venimos en flujo de reserva pendiente, nos quedamos en reserva
+    # Si venimos en flujo de reserva pendiente, SIEMPRE nos quedamos en reserva
+    # hasta que la reserva sea confirmada (tenga eventId)
     if state.get("pending_reservation") and not state.get("reservation_data", {}).get("eventId"):
+        print(f"🔒 Maintaining reservation mode - pending_reservation=True, eventId missing")
         return {**state, "route": "reservation"}
     if state.get("pending_update"):
         return {**state, "route": "update"}
     
-    q = state["question"]
-    label = llm.invoke(classifier_prompt.format(message=q)).content.strip().lower()
-    if label not in ("reservation", "rag","update"):
+    q = state["question"].lower()
+    
+    # Si es un nuevo cliente sin historial, clasificar como RAG a menos que tenga palabras clave de reserva
+    if not state.get("messages") or len(state.get("messages", [])) == 0:
+        print(f"🆕 New conversation, checking if reservation keywords present")
+    
+    # Palabras clave para detectar reservaciones (expandidas)
+    reservation_keywords = [
+        "reservar", "reservación", "reserva", "mesa", "cita", "agendar", 
+        "quiero ir", "necesito mesa", "para personas", "hoy", "mañana",
+        "cumpleaños", "celebrar", "cenar", "comer", "viernes", "sábado",
+        "lunes", "martes", "miércoles", "jueves", "domingo", "fecha", "hora",
+        "tengo", "personas", "pm", "am", "el día", "el", "de"
+    ]
+    
+    # Palabras clave para detectar actualizaciones
+    update_keywords = [
+        "cambiar", "modificar", "actualizar", "cambio", "diferente"
+    ]
+    
+    # Verificar si contiene palabras clave de reservación
+    if any(keyword in q for keyword in reservation_keywords):
+        print(f"🔵 Classified as RESERVATION based on keywords")
+        return {**state, "route": "reservation"}
+    
+    # Verificar si contiene palabras clave de actualización
+    if any(keyword in q for keyword in update_keywords):
+        print(f"🔵 Classified as UPDATE based on keywords")
+        return {**state, "route": "update"}
+    
+    # Usar el LLM como fallback, pero buscar más palabras
+    # Si el mensaje contiene números o fechas, probablemente es una reserva
+    import re
+    has_time = bool(re.search(r'\d+:\d+|\d+\s*(pm|am|PM|AM)', q))
+    has_number = bool(re.search(r'\d+', q))
+    
+    if has_time or (has_number and len(q) > 5):
+        print(f"🔵 Contains time/number, classifying as RESERVATION")
+        return {**state, "route": "reservation"}
+    
+    try:
+        label = llm.invoke(classifier_prompt.format(message=state["question"])).content.strip().lower()
+        if label not in ("reservation", "rag", "update"):
+            label = "rag"
+        print(f"🔵 LLM classified as: {label}")
+    except Exception:
         label = "rag"
+        print(f"🔵 Exception in LLM classification, defaulting to: {label}")
+    
     return {**state, "route": label}
 
 def classifier_router(state: GlobalState):
@@ -171,12 +229,12 @@ def _validate_reservation(appt: dict, tz: str = TZ):
 def _resolve_event_id_db_cache(state: GlobalState) -> Optional[str]:
     # 1) DB (confirmadas primero)
     try:
-        res = get_last_event_id_tool(state["thread_id"], require_confirmed=True)  # "EVENT_ID:<id>" | "NOT_FOUND" | "ERROR:..."
+        res = get_last_event_id_tool(state["customer_id"], require_confirmed=True)  # "EVENT_ID:<id>" | "NOT_FOUND" | "ERROR:..."
         if isinstance(res, str) and res.startswith("EVENT_ID:"):
             return res.split("EVENT_ID:", 1)[1].strip()
         if res == "NOT_FOUND":
             # Fallback: permitir no-confirmadas
-            res2 = get_last_event_id_tool(state["thread_id"], require_confirmed=False)
+            res2 = get_last_event_id_tool(state["customer_id"], require_confirmed=False)
             if isinstance(res2, str) and res2.startswith("EVENT_ID:"):
                 return res2.split("EVENT_ID:", 1)[1].strip()
     except Exception:
@@ -271,12 +329,27 @@ def reservation_node(state: GlobalState):
                     {"role": "assistant", "content": followup},
                 ]
             )
-            return {**state, "answer": followup, "messages": updated_messages}
+            return {**state, "answer": followup, "messages": updated_messages, "pending_reservation": True}
 
         # 3) Completar/normalizar/validar
-        for k in ["name", "date", "time_start", "people"]:
-            if k not in appt or appt[k] in (None, "", []):
-                raise ValueError(f"Falta campo obligatorio: {k}")
+        try:
+            missing_fields = []
+            for k in ["name", "date", "time_start", "people"]:
+                if k not in appt or appt[k] in (None, "", []):
+                    missing_fields.append(k)
+            
+            if missing_fields:
+                raise ValueError(f"Faltan campos obligatorios: {', '.join(missing_fields)}")
+        except ValueError as e:
+            # Si falta información, pedirla pero mantener en modo reserva
+            error_msg = f"Necesito más información para completar tu reserva: {str(e)}"
+            updated_messages = _roll_messages(
+                state["messages"] + [
+                    {"role": "user", "content": state["question"]},
+                    {"role": "assistant", "content": error_msg},
+                ]
+            )
+            return {**state, "answer": error_msg, "messages": updated_messages, "pending_reservation": True}
 
         # Si falta hora de fin, colocar 2h por defecto
         if not appt.get("time_end"):
@@ -302,10 +375,10 @@ def reservation_node(state: GlobalState):
 
         # 5) Tool → Calendar
         tool_result = reserva_restaurante_tool.invoke({
-            "name": appt["name"],
+            "first_name": appt["name"],
             "start_datetime": start_iso_str,
             "end_datetime": end_iso_str,
-            "num_people": int(appt["people"]),
+            "party_size": int(appt["people"]),
             "des": appt.get("des", "")
         })
 
@@ -317,12 +390,33 @@ def reservation_node(state: GlobalState):
 
         # 7) Asegurar usuario y Persistir en DB SIEMPRE
         #    Usa datos del estado si existen; de lo contrario, rellena con lo que viene del appt
-        upsert_user(
-            db,
-            thread_id=state["thread_id"],
-            phone=state.get("phone"),
-            name=state.get("user_name") or appt.get("name"),
-        )
+        print(f"🔍 Attempting user upsert for customer_id={state.get('customer_id')}")
+        
+        try:
+            customer_id_int = int(state["customer_id"])
+            
+            # Extract first_name and last_name from the name
+            full_name = state.get("user_name") or appt.get("name", "")
+            name_parts = full_name.split(maxsplit=1) if full_name else []
+            first_name = name_parts[0] if len(name_parts) > 0 else full_name
+            last_name = name_parts[1] if len(name_parts) > 1 else None
+            
+            print(f"📝 Processing reservation for customer_id={customer_id_int}, name='{full_name}' -> first='{first_name}', last='{last_name}'")
+            print(f"📞 Phone from state: {state.get('phone')}, WhatsApp: {state.get('whatsapp')}")
+            
+            upsert_user(
+                db,
+                customer_id=customer_id_int,
+                whatsapp=state.get("phone") or state.get("whatsapp"),
+                first_name=first_name,
+                last_name=last_name,
+            )
+        except (ValueError, TypeError) as e:
+            print(f"⚠️  Could not process customer_id={state.get('customer_id')}: {e}")
+        except Exception as e:
+            print(f"❌ Error upserting user: {e}")
+            import traceback
+            traceback.print_exc()
 
         # Parse a tipos fuertes para columnas Postgres (date, time)
         date_obj = dt.date.fromisoformat(appt["date"])        # 'YYYY-MM-DD'
@@ -330,28 +424,46 @@ def reservation_node(state: GlobalState):
         t_end   = dt.datetime.strptime(appt["time_end"], "%H:%M").time()
 
         status = "confirmed" if event_id else ("failed" if tool_result.startswith("❌") else "pending")
-        rec = create_reservation(
-            db,
-            thread_id=state["thread_id"],
-            name=appt["name"],
-            date=date_obj,
-            time_start=t_start,
-            time_end=t_end,
-            start_iso=start_dt,
-            end_iso=end_dt,
-            people=int(appt["people"]),
-            calendar_id=CALENDAR_ID,
-            event_id=event_id,
-            status=status
-        )
+        
+        print(f"💾 Creating reservation: customer_id={state['customer_id']}, event_id={event_id}, status={status}")
+        
+        rec = None
+        try:
+            rec = create_reservation(
+                db,
+                customer_id=state["customer_id"],
+                name=appt["name"],
+                date=date_obj,
+                time_start=t_start,
+                time_end=t_end,
+                start_iso=start_dt,
+                end_iso=end_dt,
+                party_size=int(appt["people"]),
+                calendar_id=CALENDAR_ID,
+                event_id=event_id,
+                status=status
+            )
+            print(f"✅ Reservation created successfully: reservation_id={rec.reservation_id}")
+        except Exception as e:
+            print(f"❌ Error creating reservation: {e}")
+            import traceback
+            traceback.print_exc()
+            # Don't raise - continue with the response even if DB save fails
 
         # 8) Mensaje humano
         crosses_day = (appt.get("date_end") and appt["date_end"] != appt["date"])
+        
+        # Extract links from tool_result (remove EVENT_ID part)
+        links_text = tool_result.split("|EVENT_ID:")[0].strip() if "|EVENT_ID:" in tool_result else tool_result
+        
+        print(f"📋 Tool result: {tool_result}")
+        print(f"🔗 Links text: {links_text}")
+        
         human_msg = (
             f"¡Listo, {appt['name']}! Tu reservación para el {appt['date']}"
             f"{' (termina al día siguiente)' if crosses_day else ''} "
-            f"de {appt['time_start']} a {appt['time_end']} para {appt['people']} personas. "
-            f"{tool_result}"
+            f"de {appt['time_start']} a {appt['time_end']} para {appt['people']} personas.\n\n"
+            f"{links_text}"
         )
 
         updated_messages = _roll_messages(
@@ -369,7 +481,7 @@ def reservation_node(state: GlobalState):
             **state,
             "answer": human_msg,
             "messages": updated_messages,
-            "reservation_data": {**appt, "eventId": event_id, "db_id": rec.id}
+            "reservation_data": {**appt, "eventId": event_id, "db_id": rec.reservation_id if rec else None}
         }
 
     finally:
@@ -465,8 +577,8 @@ def update_node(state: GlobalState):
         # Llamada a la tool de actualización
         tool_res = update_reservation_tool.invoke({
             "event_id": event_id,
-            "name": norm.get("name"),
-            "num_people": norm.get("people"),
+            "first_name": norm.get("name"),
+            "party_size": norm.get("people"),
             "des": norm.get("des"),
             "start_datetime": start_iso,
             "end_datetime": end_iso,
@@ -484,7 +596,7 @@ def update_node(state: GlobalState):
                 pass
 
         # ACTUALIZAR LA BASE DE DATOS POSTGRESQL
-        from db import find_reservation_by_event_id
+        from src.core.db import find_reservation_by_event_id
         
         # Buscar la reservación en la DB por event_id
         reservation = find_reservation_by_event_id(db, event_id)
@@ -497,9 +609,9 @@ def update_node(state: GlobalState):
                 reservation.name = norm["name"]
                 updated_fields.append("name")
                 
-            if norm.get("people") is not None and norm["people"] != reservation.people:
-                reservation.people = norm["people"]
-                updated_fields.append("people")
+            if norm.get("people") is not None and norm["people"] != reservation.party_size:
+                reservation.party_size = norm["people"]
+                updated_fields.append("party_size")
                 
             if date_str and t0:
                 # Actualizar fechas y horas
@@ -539,7 +651,7 @@ def update_node(state: GlobalState):
             if updated_fields:
                 reservation.updated_at = dt.datetime.now(ZoneInfo(TZ))
                 db.commit()
-                print(f"Database updated for reservation {reservation.id}: {', '.join(updated_fields)}")
+                print(f"Database updated for reservation {reservation.reservation_id}: {', '.join(updated_fields)}")
             else:
                 print("No database fields needed updating")
         else:

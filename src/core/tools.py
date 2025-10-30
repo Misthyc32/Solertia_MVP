@@ -1,19 +1,19 @@
 from pydantic import BaseModel, Field, validator
 from langchain.tools import tool
-from calendar_client import get_calendar_service, create_event, update_event, generate_calendar_invitation_link
-from config import TZ
+from src.core.calendar_client import get_calendar_service, create_event, update_event, generate_calendar_invitation_link
+from src.core.config import TZ
 import datetime as dt
 from typing import Optional
-from db import SessionLocal, get_last_event_id_by_thread
+from src.core.db import SessionLocal, get_last_event_id_by_customer_id
 
 # ID del calendario (puedes cambiarlo por el tuyo)
 CALENDAR_ID = "solertia.grp@gmail.com"
 
 class ReservaInput(BaseModel):
-    name: str = Field(..., description="Nombre del cliente")
+    first_name: str = Field(..., description="Nombre del cliente")
     start_datetime: str = Field(..., description="Inicio ISO, e.g. 2025-08-08T20:00:00-06:00")
     end_datetime: str = Field(..., description="Fin ISO, e.g. 2025-08-08T21:30:00-06:00")
-    num_people: int = Field(..., ge=1, le=30)
+    party_size: int = Field(..., ge=1, le=30)
     des: str = Field(..., description="Consideraciones para guardar en la reserva")
     @validator("start_datetime", "end_datetime")
     def _iso_ok(cls, v):
@@ -24,19 +24,19 @@ class ReservaInput(BaseModel):
         return v
 class ReservaUpdateInput(BaseModel):
     event_id: str = Field(..., description="ID del evento a actualizar en Google Calendar")
-    name: Optional[str] = Field(None, description="Nombre del cliente")
-    num_people: Optional[int] = Field(None, description="Número de personas")
+    first_name: Optional[str] = Field(None, description="Nombre del cliente")
+    party_size: Optional[int] = Field(None, description="Número de personas")
     des: Optional[str] = Field(None, description="Texto adicional para la descripción")
     start_datetime: Optional[str] = Field(None, description="Nuevo inicio ISO8601, ej. '2025-08-14T16:00:00-06:00'")
     end_datetime: Optional[str] = Field(None, description="Nuevo fin ISO8601, ej. '2025-08-14T18:00:00-06:00'")
     tz: Optional[str] = Field(None, description="Timezone IANA, ej. 'America/Monterrey'")
 
 @tool("reserva_restaurante", args_schema=ReservaInput, return_direct=True)
-def reserva_restaurante_tool(name: str, start_datetime: str, end_datetime: str, num_people: int, des:str) -> str:
+def reserva_restaurante_tool(first_name: str, start_datetime: str, end_datetime: str, party_size: int, des:str) -> str:
     """Crea una reservación en el calendario del restaurante y devuelve un link + event_id + invitation links."""
     service = get_calendar_service()
-    summary = f"Reservación: {name} ({num_people} personas)"
-    description = f"Reservación para {num_people} personas. Creada por el agente. {des}"
+    summary = f"Reservación: {first_name} ({party_size} personas)"
+    description = f"Reservación para {party_size} personas. Creada por el agente. {des}"
     try:
         # Create event in restaurant calendar
         ev = create_event(service, CALENDAR_ID, summary, description, start_datetime, end_datetime, tz=TZ)
@@ -44,7 +44,7 @@ def reserva_restaurante_tool(name: str, start_datetime: str, end_datetime: str, 
         eid = ev.get("id", "")
         
         # Generate invitation links for the user
-        invitation_links = generate_calendar_invitation_link(summary, start_datetime, end_datetime, name, num_people, des, tz=TZ)
+        invitation_links = generate_calendar_invitation_link(summary, start_datetime, end_datetime, first_name, party_size, des, tz=TZ)
         
         # Format the response with both restaurant link and invitation links
         response = f"✅ Reservación creada exitosamente!\n\n"
@@ -60,7 +60,7 @@ def reserva_restaurante_tool(name: str, start_datetime: str, end_datetime: str, 
         return f"❌ Error al crear la reservación: {e}"
 
 @tool("update_reserva_restaurante", args_schema=ReservaUpdateInput, return_direct=True)
-def update_reservation_tool(event_id: str,name: Optional[str] = None,num_people: Optional[int] = None,des: Optional[str] = None,start_datetime: Optional[str] = None,end_datetime: Optional[str] = None,tz: Optional[str] = None
+def update_reservation_tool(event_id: str,first_name: Optional[str] = None,party_size: Optional[int] = None,des: Optional[str] = None,start_datetime: Optional[str] = None,end_datetime: Optional[str] = None,tz: Optional[str] = None
 ) -> str:
     """
     Actualiza una reservación en el calendario del restaurante y devuelve un link + event_id.
@@ -71,24 +71,24 @@ def update_reservation_tool(event_id: str,name: Optional[str] = None,num_people:
 
         # Construye summary solo si hay datos nuevos
         new_summary = None
-        if name is not None or num_people is not None:
+        if first_name is not None or party_size is not None:
             # Si alguno falta, lo omitimos y dejamos que update_event conserve el original
             # (por eso no intentamos leer el evento aquí; dejamos a update_event mantener defaults)
             # Pero si quieres forzar un summary con lo disponible:
-            if name is not None and num_people is not None:
-                new_summary = f"Reservación: {name} ({num_people} personas)"
-            elif name is not None:
-                new_summary = f"Reservación: {name}"
-            elif num_people is not None:
-                new_summary = f"Reservación: ({num_people} personas)"
+            if first_name is not None and party_size is not None:
+                new_summary = f"Reservación: {first_name} ({party_size} personas)"
+            elif first_name is not None:
+                new_summary = f"Reservación: {first_name}"
+            elif party_size is not None:
+                new_summary = f"Reservación: ({party_size} personas)"
 
         # Construye description solo si hay algo que añadir/cambiar
         new_description = None
-        if des is not None or num_people is not None:
+        if des is not None or party_size is not None:
             # Texto base, añade solo lo que venga
             parts = []
-            if num_people is not None:
-                parts.append(f"Reservación para {num_people} personas.")
+            if party_size is not None:
+                parts.append(f"Reservación para {party_size} personas.")
             if des is not None:
                 parts.append(des)
             # Marca que viene del agente
@@ -117,8 +117,8 @@ def update_reservation_tool(event_id: str,name: Optional[str] = None,num_people:
         updated_end = ev.get("end", {}).get("dateTime", end_datetime)
         
         # Extract name and people from the updated summary or use defaults
-        updated_name = name if name else "Cliente"
-        updated_people = num_people if num_people else 2
+        updated_name = first_name if first_name else "Cliente"
+        updated_people = party_size if party_size else 2
         updated_des = des if des else ""
         
         invitation_links = generate_calendar_invitation_link(
@@ -141,15 +141,19 @@ def update_reservation_tool(event_id: str,name: Optional[str] = None,num_people:
     
 def get_last_event_id_tool(thread_id: str, require_confirmed: bool = True) -> str:
     """
-    Busca en la DB el EVENT_ID más reciente para este thread_id.
+    Busca en la DB el EVENT_ID más reciente para este thread_id (customer_id).
     Devuelve:
       - "EVENT_ID:<id>" si existe
       - "NOT_FOUND" si no hay
       - "ERROR:<msg>" ante excepción
+    
+    Args:
+        thread_id: Customer/Thread ID (unique identifier for the customer)
+        require_confirmed: Si True, solo busca reservas confirmadas
     """
     session = SessionLocal()
     try:
-        eid = get_last_event_id_by_thread(session, thread_id, require_confirmed=require_confirmed)
+        eid = get_last_event_id_by_customer_id(session, thread_id, require_confirmed=require_confirmed)
         return f"EVENT_ID:{eid}" if eid else "NOT_FOUND"
     except Exception as e:
         return f"ERROR:{e}"

@@ -4,7 +4,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from config import SCOPES, TZ
+from src.core.config import SCOPES, TZ
 
 CREDENTIALS_FILE = "credentials.json"
 TOKEN_FILE = "token.json"
@@ -35,7 +35,7 @@ def create_event(service, calendar_id, summary, description, start_iso, end_iso,
     }
     return service.events().insert(calendarId=calendar_id, body=body).execute()
 
-def generate_calendar_invitation_link(summary, start_iso, end_iso, name, num_people, des="", tz=TZ):
+def generate_calendar_invitation_link(summary, start_iso, end_iso, first_name, party_size, des="", tz=TZ):
     """
     Generates a calendar invitation link that users can add to their own calendar.
     Creates links for Google Calendar, Outlook, and Apple Calendar.
@@ -62,7 +62,7 @@ def generate_calendar_invitation_link(summary, start_iso, end_iso, name, num_peo
     
     # Create client-friendly description (simple and nice)
     client_summary = f"Reservación en La Casona"
-    client_description = f"Tienes una reservación en La Casona para {num_people} personas"
+    client_description = f"Tienes una reservación en La Casona para {party_size} personas"
     if des:
         client_description += f"\n\nNotas: {des}"
     
@@ -91,7 +91,7 @@ def generate_calendar_invitation_link(summary, start_iso, end_iso, name, num_peo
 VERSION:2.0
 PRODID:-//La Casona//Restaurant Booking//EN
 BEGIN:VEVENT
-UID:{name.replace(' ', '_').replace(':', '_')}@lacasona.com
+UID:{first_name.replace(' ', '_').replace(':', '_')}@lacasona.com
 DTSTAMP:{dtstamp}
 DTSTART:{start_ics}
 DTEND:{end_ics}
