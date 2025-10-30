@@ -190,9 +190,40 @@ def run_sql(sql: str) -> str:
     except Exception as e:
         return f"SQL error: {e}"
 
+    # Check if all date/time columns are NULL (common issue)
+    date_columns = [col for col in df.columns if any(term in col.lower() for term in ['date', 'month', 'week', 'day', 'time'])]
+    if date_columns:
+        null_counts = {}
+        for col in date_columns:
+            null_count = df[col].isna().sum()
+            total = len(df)
+            null_counts[col] = f"{null_count}/{total} NULL"
+            if null_count == total and total > 0:
+                # All values are NULL - suggest using alternative date column
+                suggestions = []
+                if 'date' in sql.lower():
+                    suggestions.append("Try using COALESCE(r.date, r.created_at, to_date(r.reservation_time, 'DD/MM/YYYY')) instead of just r.date")
+                    suggestions.append("Or use created_at if date is NULL: date_trunc('month', COALESCE(r.date, r.created_at))")
+                return (
+                    f"WARNING: All values in '{col}' are NULL ({null_count}/{total} rows). "
+                    f"This means the date column used has no values. "
+                    f"{' '.join(suggestions)}. "
+                    f"\n\nCurrent result: {len(df)} row(s) with NULL dates.\n"
+                    f"Available columns: {list(df.columns)}\n"
+                    f"Null counts: {null_counts}"
+                )
+
     meta = f"rows={len(df)}, cols={list(df.columns)}"
     preview_md = df.head(10).to_markdown(index=False)
     preview_json = df.head(10).to_json(orient="records")
+    
+    # Add warning if single row with NULL date for time-series queries
+    if len(df) == 1 and date_columns:
+        date_col = date_columns[0]
+        if df[date_col].iloc[0] is None or pd.isna(df[date_col].iloc[0]):
+            warning = f"\n\n⚠️ WARNING: Only 1 row returned with NULL {date_col}. For historical charts, you need multiple data points. Try using COALESCE(r.date, r.created_at, to_date(r.reservation_time, 'DD/MM/YYYY')) AS date_col in your GROUP BY."
+            return f"{meta}\n\nPREVIEW:\n{preview_md}\n\nDF_JSON_HEAD:\n{preview_json}{warning}"
+    
     return f"{meta}\n\nPREVIEW:\n{preview_md}\n\nDF_JSON_HEAD:\n{preview_json}"
 
 
@@ -242,10 +273,12 @@ def get_schema() -> str:
         "- menu_price = menu_items.price (current list price); margin% = menu_items.margen_ganancia.\n"
         "- Approx earnings = SUM(revenue * COALESCE(menu_items.margen_ganancia, 0)).\n"
         "- Tip rate = tip / NULLIF(total_ticket,0) at the reservation level.\n"
-        "- Date handling: prefer reservations.date; if NULL, use to_date(reservation_time,'DD/MM/YYYY').\n"
+        "- Date handling: ALWAYS use COALESCE for dates: COALESCE(reservations.date, reservations.created_at, to_date(reservations.reservation_time,'DD/MM/YYYY')) AS date_col.\n"
+        "  * reservations.date may be NULL, so fallback to created_at or parse reservation_time.\n"
+        "  * Example: date_trunc('month', COALESCE(r.date, r.created_at, to_date(r.reservation_time, 'DD/MM/YYYY'))) AS month\n"
         "- Store filter: reservations.store_id.\n"
         "- Waiter performance: group by waiters.waiter_id (join via reservations.waiter_id).\n"
-        "- Weekly grouping: date_trunc('week', <date_col>) as wk.\n"
+        "- Weekly grouping: date_trunc('week', COALESCE(date_col, created_at)) AS wk.\n"
     )
 
 
@@ -283,9 +316,29 @@ def plot_from_sql(data_sql: str, x: str, y_cols: List[str], title: Optional[str]
     if x not in df.columns or any(col not in df.columns for col in y_cols):
         return f"Missing columns. Available: {list(df.columns)}"
 
+    # Validate we have enough data points for a meaningful chart
+    if len(df) < 2:
+        return (
+            f"Query returned only {len(df)} row(s). For historical charts, you need multiple data points over time. "
+            f"Make sure your SQL includes a GROUP BY with a date/time column (like date, wk, month, etc.) "
+            f"and ORDER BY that column. Example: SELECT date_trunc('week', date) AS wk, SUM(revenue) AS total "
+            f"FROM ... GROUP BY wk ORDER BY wk"
+        )
+
     # Sort by x if possible
     try:
         df = df.sort_values(by=[x])
+    except Exception:
+        pass
+
+    # Convert x column to string if it's not numeric or datetime (for better display)
+    try:
+        # Try to convert dates if they're strings
+        if df[x].dtype == 'object':
+            try:
+                df[x] = pd.to_datetime(df[x])
+            except (ValueError, TypeError):
+                pass
     except Exception:
         pass
 
@@ -294,13 +347,30 @@ def plot_from_sql(data_sql: str, x: str, y_cols: List[str], title: Optional[str]
         step = max(1, len(df) // 1500)
         df = df.iloc[::step].copy()
 
+    # Validate y columns are numeric
+    for col in y_cols:
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            try:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            except Exception:
+                return f"Column '{col}' is not numeric and cannot be converted. Available numeric columns: {[c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]}"
+
     fig, ax = plt.subplots(figsize=(10, 5), constrained_layout=True)
     for col in y_cols:
-        ax.plot(df[x].values, df[col].values, label=col)
+        # Filter out NaN values
+        valid_mask = pd.notna(df[x]) & pd.notna(df[col])
+        if valid_mask.sum() < 1:
+            continue
+        ax.plot(df[valid_mask][x].values, df[valid_mask][col].values, label=col, marker='o', markersize=3)
     ax.set_xlabel(x)
     ax.set_ylabel("value")
     ax.set_title(title or "Chart")
     ax.legend(loc="best")
+    ax.grid(True, alpha=0.3)
+
+    # Rotate x-axis labels if they're dates or strings
+    if df[x].dtype == 'object' or pd.api.types.is_datetime64_any_dtype(df[x]):
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=120)
@@ -327,9 +397,23 @@ Rules:
 - revenue (line) = quantity * price_at_visit.
 - earnings (approx) = SUM(revenue * COALESCE(menu_items.margen_ganancia, 0)).
 - tip_rate = tip / NULLIF(total_ticket, 0).
-- Dates: prefer reservations.date; else use to_date(reservation_time, 'DD/MM/YYYY').
+- Dates: ALWAYS use COALESCE to handle NULL dates. Use: COALESCE(reservations.date, reservations.created_at, to_date(reservations.reservation_time, 'DD/MM/YYYY')) AS date_col
+- If reservations.date is NULL, fallback to created_at or parse reservation_time.
+
+CRITICAL FOR HISTORICAL CHARTS:
+- When creating historical/time-series charts, you MUST include a time dimension in your SELECT.
+- ALWAYS use GROUP BY with a date/time column (date, week, month, etc.) for historical data.
+- NEVER return just a single aggregated total for charts - you need multiple data points over time.
+- Examples for historical queries (with NULL handling):
+  * Daily: SELECT DATE(COALESCE(r.date, r.created_at, to_date(r.reservation_time, 'DD/MM/YYYY'))) AS day, SUM(ri.quantity * ri.price_at_visit) AS total FROM public.reservations r JOIN public.reservation_items ri ON r.reservation_id = ri.reservation_id GROUP BY day ORDER BY day
+  * Weekly: SELECT date_trunc('week', COALESCE(r.date, r.created_at, to_date(r.reservation_time, 'DD/MM/YYYY'))) AS wk, SUM(ri.quantity * ri.price_at_visit) AS total FROM public.reservations r JOIN public.reservation_items ri ON r.reservation_id = ri.reservation_id GROUP BY wk ORDER BY wk
+  * Monthly: SELECT date_trunc('month', COALESCE(r.date, r.created_at, to_date(r.reservation_time, 'DD/MM/YYYY'))) AS month, SUM(ri.quantity * ri.price_at_visit) AS total FROM public.reservations r JOIN public.reservation_items ri ON r.reservation_id = ri.reservation_id GROUP BY month ORDER BY month
+- The x-axis column for plot_from_sql MUST be the time dimension (day, wk, month, date, etc.)
+- The y-axis columns must be numeric aggregations (SUM, AVG, COUNT, etc.)
+- Always ORDER BY the time column to ensure chronological order.
+
+General rules:
 - Store filter: reservations.store_id = <id>.
-- Weekly: date_trunc('week', <date_col>) AS wk; GROUP BY wk ORDER BY wk.
 - Keep answers concise. When returning a plot, output EXACTLY:
   PLOT_ID:<uuid>
 """
@@ -355,7 +439,16 @@ class ManagerAnalyticsService:
         PlotTool = StructuredTool.from_function(
             func=plot_with_cache,
             name="plot_from_sql",
-            description="Run a read-only SELECT, then plot y columns vs x. Returns PLOT_ID:<uuid>.",
+            description=(
+                "Run a read-only SELECT query, then plot y columns vs x. Returns PLOT_ID:<uuid>.\n"
+                "CRITICAL: For historical/time-series charts, the SQL MUST include:\n"
+                "1. A time dimension column (date, wk, month, etc.) in the SELECT\n"
+                "2. GROUP BY with that time column\n"
+                "3. ORDER BY that time column\n"
+                "4. Multiple rows (not just one aggregated total)\n"
+                "Example: SELECT date_trunc('week', date) AS wk, SUM(revenue) AS total FROM ... GROUP BY wk ORDER BY wk\n"
+                "Then use: x='wk', y_cols=['total']"
+            ),
             args_schema=PlotArgs,
         )
 
@@ -374,7 +467,7 @@ class ManagerAnalyticsService:
             tools=self.tools,
             verbose=True,
             max_iterations=8,
-            early_stopping_method="generate",
+            handle_parsing_errors=True,
         )
 
     def query(self, prompt: str) -> Dict:
