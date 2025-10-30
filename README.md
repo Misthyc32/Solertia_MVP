@@ -27,6 +27,8 @@ The API will be available at:
 - **API**: http://localhost:8000
 - **Documentation**: http://localhost:8000/docs
 - **Health Check**: http://localhost:8000/health
+- **Manager Analytics UI**: http://localhost:8000/manager/ui
+- **Manager Analytics API**: http://localhost:8000/manager/ask
 
 ## 📁 Project Structure
 
@@ -37,6 +39,10 @@ Solertia_MVP/
 │   │   └── main.py       # FastAPI application
 │   ├── core/             # Core business logic
 │   │   ├── services/     # Service layer
+│   │   │   ├── chat_service.py           # Chat service
+│   │   │   ├── reservation_service.py    # Reservation service
+│   │   │   ├── menu_service.py           # Menu service
+│   │   │   └── manager_analytics_service.py  # Manager Analytics service
 │   │   ├── graph.py      # Conversation graph
 │   │   ├── db.py         # Database models
 │   │   ├── tools.py      # Calendar tools
@@ -62,6 +68,12 @@ Solertia_MVP/
 - `POST /menu/search` - Search menu items
 - `GET /menu/categories` - Get menu categories
 
+### Manager Analytics
+- `POST /manager/ask` - Process analytics queries using SQL agent
+- `GET /manager/plots/{plot_id}` - Get plot visualization by ID
+- `GET /manager/map_data` - Get store locations for map visualization
+- `GET /manager/ui` - Interactive manager analytics dashboard
+
 ### System
 - `GET /health` - Health check
 - `GET /` - API information
@@ -70,7 +82,7 @@ Solertia_MVP/
 
 Test the API using the interactive documentation at http://localhost:8000/docs
 
-Example chat request:
+### Example Chat Request
 ```json
 {
   "message": "Hola, quiero hacer una reservación para 4 personas mañana a las 8pm",
@@ -82,20 +94,63 @@ Example chat request:
 }
 ```
 
+### Example Manager Analytics Query
+```bash
+curl -X POST "http://localhost:8000/manager/ask" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Top 10 SKUs por revenue para store_id=3 toda la historia"}'
+```
+
+### Manager Analytics UI
+Visit http://localhost:8000/manager/ui for an interactive dashboard with:
+
+**Map Features:**
+- Interactive map showing all store locations (powered by Plotly.js)
+- Visual markers for each restaurant/store
+- Click on any store marker to automatically query top SKUs by revenue
+- Hover over markers to see store details (name, ID, coordinates)
+- Responsive design that adapts to screen size
+
+**Chat Interface:**
+- Natural language SQL query interface
+- Ask questions like:
+  - "Top 10 SKUs por revenue para store_id=3 toda la historia"
+  - "Revenue semanal por tienda"
+  - "Mejores meseros por propinas"
+- Automatic chart generation from query results
+- Visual plots displayed inline with responses
+- Support for Ctrl+Enter (Cmd+Enter on Mac) to send queries
+
+**Features:**
+- Real-time SQL query execution
+- Secure read-only database access
+- Automatic data visualization
+- Store location mapping
+- Historical data analysis
+
 ## 🔧 Configuration
 
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `DATABASE_URL` | Database connection string | Yes |
 | `OPENAI_API_KEY` | OpenAI API key | Yes |
+| `SUPABASE_PG_CONN` | Supabase PostgreSQL connection (for Manager Analytics) | No* |
+| `SUPABASE_SP_CONN` | Supabase connection pooler (preferred for Manager Analytics) | No* |
 | `LANGSMITH_API_KEY` | LangSmith API key | No |
 | `TZ` | Timezone | No |
+
+\* *Manager Analytics requires a database connection. It will use `SUPABASE_PG_CONN`, `SUPABASE_SP_CONN`, `SUPABASE_DB_URL`, or fall back to `DATABASE_URL`.*
 
 ## 🎯 Features
 
 - ✅ **Chat Interface** - Natural conversation with restaurant assistant
 - ✅ **Reservation System** - Create and manage reservations
 - ✅ **Menu Search** - Search and recommend menu items
+- ✅ **Manager Analytics** - SQL-powered analytics agent for managers
+  - Natural language to SQL queries
+  - Interactive data visualization with charts
+  - Store location mapping
+  - Read-only queries with security validation
 - ✅ **Health Monitoring** - System health checks
 - ✅ **Input Validation** - Secure input handling
 - ✅ **Error Handling** - Comprehensive error management
@@ -114,3 +169,6 @@ The API is built with:
 - **SQLAlchemy** - Database ORM
 - **LangChain** - AI/LLM integration
 - **Pydantic** - Data validation
+- **SQLGlot** - SQL parsing and validation (Manager Analytics)
+- **Pandas** - Data analysis (Manager Analytics)
+- **Matplotlib** - Chart generation (Manager Analytics)

@@ -2,8 +2,9 @@
 FastAPI application for Solertia MVP.
 Provides REST API endpoints for chat, reservations, and menu operations.
 """
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 import logging
@@ -14,6 +15,7 @@ from datetime import datetime
 from src.core.services.chat_service import ChatService
 from src.core.services.reservation_service import ReservationService
 from src.core.services.menu_service import MenuService
+from src.core.services.manager_analytics_service import ManagerAnalyticsService
 
 # Import utilities
 from src.utils.error_handling import (
@@ -54,6 +56,7 @@ app.add_middleware(
 chat_service = ChatService()
 reservation_service = ReservationService()
 menu_service = MenuService()
+manager_analytics_service = ManagerAnalyticsService()
 
 # Pydantic models for request/response
 class ChatRequest(BaseModel):
@@ -256,6 +259,248 @@ async def get_recommendations(preferences: str, limit: int = 3):
         logger.error(f"Error getting recommendations: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error getting recommendations: {str(e)}")
 
+# ========== MANAGER ANALYTICS ENDPOINTS ==========
+# Independent analytics agent for managers with SQL query capabilities
+
+class ManagerQueryRequest(BaseModel):
+    prompt: str = Field(..., description="Analytics query in natural language")
+
+@app.post("/manager/ask")
+async def manager_ask(request: ManagerQueryRequest, http_request: Request):
+    """
+    Process an analytics query using the SQL agent.
+    Returns text response with optional plot_id for visualization.
+    """
+    try:
+        logger.info(f"Processing manager analytics query: {request.prompt}")
+        result = manager_analytics_service.query(request.prompt)
+        
+        # Build plot URL if plot_id exists
+        if result.get("plot_id"):
+            plot_url = str(http_request.url_for("manager_get_plot", plot_id=result["plot_id"]))
+            result["plot_url"] = plot_url
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error in manager analytics query: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+
+@app.get("/manager/plots/{plot_id}", name="manager_get_plot")
+async def manager_get_plot(plot_id: str):
+    """Get a plot image by ID."""
+    data = manager_analytics_service.get_plot(plot_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Plot not found or expired")
+    return Response(content=data, media_type="image/png")
+
+@app.get("/manager/map_data")
+async def manager_map_data():
+    """Get store locations for map visualization."""
+    try:
+        data = manager_analytics_service.get_map_data()
+        return JSONResponse(data)
+    except Exception as e:
+        logger.error(f"Error loading map data: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error loading map data: {str(e)}")
+
+@app.get("/manager/ui")
+async def manager_ui():
+    """Manager Analytics UI - Interactive dashboard with map and SQL chat."""
+    return Response(content=MANAGER_UI_HTML, media_type="text/html")
+
+# Manager Analytics UI HTML
+MANAGER_UI_HTML = r"""
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Manager Analytics · Solertia MVP</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <style>
+    :root { --gap: 12px; --bg:#0b0d10; --card:#14181d; --txt:#e9eef5; --muted:#9fb0c3; --brand:#46a6ff; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--txt); font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans'; }
+    .app { display: grid; grid-template-columns: 1fr 380px; grid-auto-rows: 100%; gap: var(--gap); height: 100%; padding: var(--gap); }
+    .pane { background: var(--card); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+    .map-header, .chat-header { padding: 10px 14px; border-bottom: 1px solid #202733; display:flex; align-items:center; gap:10px; }
+    .map-header h2, .chat-header h2 { font-size: 16px; margin: 0; font-weight: 600; }
+    .map-wrap { flex: 1; min-height: 0; }
+    #map { width: 100%; height: 100%; }
+    .chat { display:flex; flex-direction:column; height:100%; }
+    .chat-body { flex:1; overflow:auto; padding: 10px 14px; display:flex; flex-direction:column; gap:10px; }
+    .msg { background:#0e1319; border:1px solid #1e2632; padding:10px 12px; border-radius:12px; max-width: 100%; white-space: pre-wrap; }
+    .msg.agent { background:#0f1722; border-color:#1d2836; }
+    .msg.user  { background:#101820; border-color:#1c242e; }
+    .chat-input { border-top: 1px solid #202733; padding:10px; display:flex; gap:8px; }
+    .chat-input textarea { resize: none; flex:1; height:74px; background:#0b1118; color:var(--txt); border:1px solid #1f2733; border-radius:10px; padding:10px; outline:none; }
+    .btn { background: var(--brand); color: #00233f; border: none; border-radius: 10px; padding: 10px 14px; font-weight: 700; cursor: pointer; }
+    .btn:disabled{ opacity:.6; cursor:not-allowed; }
+    .tiny { color: var(--muted); font-size: 12px; }
+    .pill { padding: 3px 8px; border-radius:999px; background:#0a121b; border:1px solid #1e2733; font-size:12px; color:#9fb0c3; }
+    .plot-thumb { width:100%; border-radius:10px; border:1px solid #1f2733; margin-top:8px; }
+    @media (max-width: 1024px) {
+      .app { grid-template-columns: 1fr; }
+      .pane.chat { height: 48vh; }
+      .pane.map  { height: 52vh; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="pane map">
+      <div class="map-header">
+        <span class="pill">Mapa</span>
+        <h2>Restaurantes</h2>
+        <span class="tiny" id="map-meta"></span>
+      </div>
+      <div class="map-wrap"><div id="map"></div></div>
+    </section>
+
+    <aside class="pane chat">
+      <div class="chat-header">
+        <span class="pill">Agente</span>
+        <h2>Consultas SQL y Gráficas</h2>
+      </div>
+      <div class="chat-body" id="chat"></div>
+      <div class="chat-input">
+        <textarea id="prompt" placeholder="Ej.: Top 10 SKUs por revenue para store_id=3 toda la historia"></textarea>
+        <button id="send" class="btn">Enviar</button>
+      </div>
+    </aside>
+  </div>
+
+<script>
+const chatEl   = document.getElementById('chat');
+const promptEl = document.getElementById('prompt');
+const sendBtn  = document.getElementById('send');
+const mapMeta  = document.getElementById('map-meta');
+const mapEl    = document.getElementById('map');
+
+function addMsg(text, who='agent', plotUrl=null) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + who;
+  div.textContent = text;
+  if (plotUrl) {
+    const img = document.createElement('img');
+    img.className = 'plot-thumb';
+    img.src = plotUrl;
+    img.alt = 'Gráfica';
+    div.appendChild(img);
+  }
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+async function sendPrompt() {
+  const q = (promptEl.value || '').trim();
+  if (!q) return;
+  sendBtn.disabled = true;
+  addMsg(q, 'user');
+  promptEl.value = '';
+  try {
+    const res = await fetch('/manager/ask', {
+      method: 'POST',
+      headers: { 'content-type':'application/json' },
+      body: JSON.stringify({ prompt: q })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const text = data.text || '(Sin texto)';
+    const plot = data.plot_url || null;
+    addMsg(text, 'agent', plot);
+  } catch (err) {
+    addMsg('Error: ' + err.message, 'agent');
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+sendBtn.addEventListener('click', sendPrompt);
+promptEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    sendPrompt();
+  }
+});
+
+async function sendPromptWithText(q) {
+  try {
+    sendBtn.disabled = true;
+    const res = await fetch('/manager/ask', {
+      method: 'POST',
+      headers: { 'content-type':'application/json' },
+      body: JSON.stringify({ prompt: q })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    addMsg(data.text || '(Sin texto)', 'agent', data.plot_url || null);
+  } catch (err) {
+    addMsg('Error: ' + err.message, 'agent');
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+
+async function loadMap() {
+  try {
+    const res = await fetch('/manager/map_data');
+    if (!res.ok) throw new Error('No se pudo cargar /manager/map_data');
+    const rows = await res.json();
+    mapMeta.textContent = rows.length + ' ubicaciones';
+
+    const sizes = rows.map(r => 8 + 24 * ((r.Volumen ?? 0)));
+    const trace = {
+      type: 'scattermapbox',
+      lat: rows.map(r => r.Latitud),
+      lon: rows.map(r => r.Longitud),
+      text: rows.map(r => r.Store),
+      customdata: rows.map(r => r.StoreId),
+      hovertemplate:
+        '<b>%{text}</b><br>' +
+        'Store ID: %{customdata}<br>' +
+        'Lat: %{lat:.5f}<br>Lon: %{lon:.5f}<extra></extra>',
+      mode: 'markers',
+      marker: { size: sizes }
+    };
+
+    const lats = rows.map(r => r.Latitud);
+    const lons = rows.map(r => r.Longitud);
+    const center = {
+      lat: lats.reduce((a,b)=>a+b,0)/lats.length,
+      lon: lons.reduce((a,b)=>a+b,0)/lons.length
+    };
+
+    const layout = {
+      dragmode: 'zoom',
+      mapbox: { style: 'open-street-map', center, zoom: 5.5 },
+      margin: { l:0, r:0, t:0, b:0 },
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent'
+    };
+
+    await Plotly.newPlot(mapEl, [trace], layout, {displaylogo:false, responsive:true});
+    window.addEventListener('resize', () => Plotly.Plots.resize(mapEl));
+
+    mapEl.on('plotly_click', (ev) => {
+      const pt = ev.points?.[0];
+      if (!pt) return;
+      const storeId = pt.customdata;
+      const storeName = pt.text;
+      const prompt = `Top 10 SKUs por revenue para store_id=${storeId} usando toda la historia`;
+      addMsg(`🗺️ ${storeName} [${storeId}]\n${prompt}`, 'user');
+      sendPromptWithText(prompt);
+    });
+  } catch (e) {
+    console.error(e);
+    mapMeta.textContent = 'Error cargando mapa';
+  }
+}
+loadMap();
+</script>
+</body>
+</html>
+"""
+
 # Root endpoint
 @app.get("/")
 async def root():
@@ -267,7 +512,8 @@ async def root():
             "health": "/health",
             "chat": "/chat",
             "reservations": "/reservations",
-            "menu": "/menu"
+            "menu": "/menu",
+            "manager": "/manager"
         }
     }
 

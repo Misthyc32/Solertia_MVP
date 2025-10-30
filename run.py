@@ -24,6 +24,8 @@ def main():
         logger.info("🌐 Server will be available at: http://localhost:8000")
         logger.info("📖 API documentation at: http://localhost:8000/docs")
         logger.info("🏥 Health check at: http://localhost:8000/health")
+        logger.info("📊 Manager Analytics UI at: http://localhost:8000/manager/ui")
+        logger.info("💬 Manager Analytics API at: http://localhost:8000/manager/ask")
         
         uvicorn.run(
             "src.api.main:app",
