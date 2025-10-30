@@ -51,12 +51,12 @@ Solertia_MVP/
 
 ### Chat
 - `POST /chat` - Process chat messages
-- `GET /chat/{thread_id}/history` - Get conversation history
+- `GET /chat/{customer_id}/history` - Get conversation history
 
 ### Reservations
 - `POST /reservations` - Create reservation
 - `PUT /reservations/{event_id}` - Update reservation
-- `GET /reservations/{thread_id}` - Get user reservations
+- `GET /reservations/{customer_id}` - Get user reservations
 
 ### Menu
 - `POST /menu/search` - Search menu items
@@ -74,7 +74,11 @@ Example chat request:
 ```json
 {
   "message": "Hola, quiero hacer una reservación para 4 personas mañana a las 8pm",
-  "thread_id": "user_123"
+  "customer_id": "user_123",
+  "user_data": {
+    "phone": "+1234567890",
+    "name": "Juan Pérez"
+  }
 }
 ```
 
