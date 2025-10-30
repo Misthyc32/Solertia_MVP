@@ -69,6 +69,7 @@ class ChatResponse(BaseModel):
     route: str
     pending_reservation: bool
     pending_update: bool
+    pending_cancel: bool
     reservation_data: Dict[str, Any]
     customer_id: str
 
@@ -202,6 +203,23 @@ async def update_reservation(event_id: str, request: ReservationUpdateRequest):
     except Exception as e:
         logger.error(f"Error updating reservation: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error updating reservation: {str(e)}")
+
+@app.delete("/reservations/{event_id}")
+async def cancel_reservation(event_id: str):
+    """Cancel an existing reservation."""
+    try:
+        logger.info(f"Cancelling reservation {event_id}")
+        
+        result = reservation_service.cancel_reservation(event_id)
+        
+        if result["success"]:
+            return {"message": "Reservation cancelled successfully", **result}
+        else:
+            raise HTTPException(status_code=400, detail=result["error"])
+            
+    except Exception as e:
+        logger.error(f"Error cancelling reservation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error cancelling reservation: {str(e)}")
 
 @app.get("/reservations/{customer_id}")
 async def get_reservations(customer_id: str, limit: int = 50):

@@ -4,7 +4,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.documents import Document
 from langchain.prompts import ChatPromptTemplate
 from langchain.chat_models import init_chat_model
-from src.core.tools import CALENDAR_ID, reserva_restaurante_tool, update_reservation_tool, get_last_event_id_tool  
+from src.core.tools import CALENDAR_ID, reserva_restaurante_tool, update_reservation_tool, cancel_reservation_tool, get_last_event_id_tool  
 import datetime as dt
 import json
 from src.core.config import TZ
@@ -31,6 +31,7 @@ class GlobalState(TypedDict):
     route: str
     pending_reservation: bool  
     pending_update: bool
+    pending_cancel: bool
 
 reservation_prompt = ChatPromptTemplate.from_template(
     """
@@ -90,27 +91,75 @@ Cuando ya tengas toda la información para actualizar, responde **únicamente** 
 No pongas explicaciones ni texto adicional fuera del JSON.
 """
 )
-classifier_prompt = ChatPromptTemplate.from_template(
-    """You are a classifier for a restaurant assistant. Classify the following message as one of three categories:
 
-- "reservation" for booking/scheduling/reserving a table (reservar, mesa, cita, agendar, reservación, reserva, quiero ir, necesito mesa, etc.)
-- "update" for modifying/changing an existing reservation (cambiar hora, personas, modificar, actualizar, etc.)
+cancel_prompt = ChatPromptTemplate.from_template(
+    """
+Eres un asistente del restaurante La Casona. Hoy es {today} ({tz}).
+El cliente quiere CANCELAR una reservación existente.
+
+Si el cliente confirma que quiere cancelar, responde simplemente "CONFIRMADO".
+Si el cliente aún no está seguro o no ha confirmado, pide confirmación de forma amable y natural.
+"""
+)
+classifier_prompt = ChatPromptTemplate.from_template(
+    """You are a classifier for a restaurant assistant. Classify the following message as one of four categories:
+
+- "cancel" for cancelling/deleting an existing reservation (HIGHEST PRIORITY - check this first)
+  Examples: "cancelar", "cancelar mi reserva", "quiero cancelar", "eliminar reservación", "ya no puedo", "no quiero ir"
+  
+- "update" for modifying/changing an existing reservation
+  Examples: "cambiar hora", "cambiar personas", "modificar reserva", "actualizar reservación"
+  
+- "reservation" for booking/scheduling/reserving a table
+  Examples: "reservar", "mesa", "quiero hacer reservación", "necesito mesa", "agendar"
+  
 - "rag" for menu questions, recommendations, or general restaurant information
+  Examples: "¿Qué platillos tienen?", "recomiéndame algo", "precios"
+
+IMPORTANT RULES:
+1. If the message contains "cancelar", "eliminar", "borrar", "anular" → ALWAYS classify as "cancel"
+2. If the message contains "cambiar", "modificar", "actualizar" → classify as "update"
+3. Only classify as "reservation" if it's clearly about making a NEW reservation
 
 Examples:
 - "Quiero hacer una reservación" → reservation
 - "Reservar mesa para 4 personas" → reservation
-- "Necesito una mesa" → reservation
 - "¿Qué platillos tienen?" → rag
 - "Recomiéndame algo" → rag
 - "Cambiar mi reserva" → update
+- "Cancelar mi reserva" → cancel (NOT reservation!)
+- "Quiero cancelar" → cancel (NOT reservation!)
+- "Ya no puedo ir" → cancel
+- "Eliminar reservación" → cancel
 
-Respond only with: reservation or update or rag.
+Respond only with: reservation or update or cancel or rag.
 
 Message: {message}"""
 )
 
 def classifier_node(state: GlobalState):
+    q = state["question"].lower()
+    
+    # Verificar si hay intención de cancelar/actualizar PRIMERO, incluso si hay pending_reservation
+    # Esto permite cancelar/actualizar una reserva que está en proceso
+    cancel_intent = any(keyword in q for keyword in [
+        "cancelar", "cancelación", "cancela", "eliminar", "elimina", "borrar", 
+        "anular", "anula", "ya no", "no puedo", "no podré"
+    ])
+    update_intent = any(keyword in q for keyword in [
+        "cambiar", "modificar", "actualizar", "cambio", "diferente"
+    ])
+    
+    # Si hay intención clara de cancelar, ir directo a cancel (sin importar pending_reservation)
+    if cancel_intent:
+        print(f"🔴 Cancel intent detected, routing to CANCEL")
+        return {**state, "route": "cancel", "pending_cancel": True}
+    
+    # Si hay intención clara de actualizar, ir directo a update
+    if update_intent:
+        print(f"🟡 Update intent detected, routing to UPDATE")
+        return {**state, "route": "update", "pending_update": True}
+    
     # Si venimos en flujo de reserva pendiente, SIEMPRE nos quedamos en reserva
     # hasta que la reserva sea confirmada (tenga eventId)
     if state.get("pending_reservation") and not state.get("reservation_data", {}).get("eventId"):
@@ -118,12 +167,26 @@ def classifier_node(state: GlobalState):
         return {**state, "route": "reservation"}
     if state.get("pending_update"):
         return {**state, "route": "update"}
-    
-    q = state["question"].lower()
+    if state.get("pending_cancel"):
+        return {**state, "route": "cancel"}
     
     # Si es un nuevo cliente sin historial, clasificar como RAG a menos que tenga palabras clave de reserva
     if not state.get("messages") or len(state.get("messages", [])) == 0:
         print(f"🆕 New conversation, checking if reservation keywords present")
+    
+    # Palabras clave para detectar cancelaciones (PRIORIDAD ALTA - verificar primero)
+    cancel_keywords = [
+        "cancelar", "cancelación", "cancela", "eliminar", "elimina", "borrar", 
+        "ya no", "no puedo", "no podré", "no voy a poder", "anular", "anula",
+        "quiero cancelar", "deseo cancelar", "necesito cancelar", "cancelar mi reserva",
+        "cancelar mi reservación", "eliminar mi reserva", "borrar mi reserva"
+    ]
+    
+    # Palabras clave para detectar actualizaciones
+    update_keywords = [
+        "cambiar", "modificar", "actualizar", "cambio", "diferente", "cambiar mi reserva",
+        "modificar mi reserva", "actualizar mi reserva"
+    ]
     
     # Palabras clave para detectar reservaciones (expandidas)
     reservation_keywords = [
@@ -134,20 +197,21 @@ def classifier_node(state: GlobalState):
         "tengo", "personas", "pm", "am", "el día", "el", "de"
     ]
     
-    # Palabras clave para detectar actualizaciones
-    update_keywords = [
-        "cambiar", "modificar", "actualizar", "cambio", "diferente"
-    ]
+    # IMPORTANTE: Verificar cancelación PRIMERO (mayor prioridad)
+    # Si contiene palabras de cancelación, NO importa si también tiene palabras de reserva
+    if any(keyword in q for keyword in cancel_keywords):
+        print(f"🔵 Classified as CANCEL based on keywords")
+        return {**state, "route": "cancel"}
     
-    # Verificar si contiene palabras clave de reservación
-    if any(keyword in q for keyword in reservation_keywords):
-        print(f"🔵 Classified as RESERVATION based on keywords")
-        return {**state, "route": "reservation"}
-    
-    # Verificar si contiene palabras clave de actualización
+    # Luego verificar actualización
     if any(keyword in q for keyword in update_keywords):
         print(f"🔵 Classified as UPDATE based on keywords")
         return {**state, "route": "update"}
+    
+    # Finalmente verificar reservación (menor prioridad)
+    if any(keyword in q for keyword in reservation_keywords):
+        print(f"🔵 Classified as RESERVATION based on keywords")
+        return {**state, "route": "reservation"}
     
     # Usar el LLM como fallback, pero buscar más palabras
     # Si el mensaje contiene números o fechas, probablemente es una reserva
@@ -161,7 +225,7 @@ def classifier_node(state: GlobalState):
     
     try:
         label = llm.invoke(classifier_prompt.format(message=state["question"])).content.strip().lower()
-        if label not in ("reservation", "rag", "update"):
+        if label not in ("reservation", "rag", "update", "cancel"):
             label = "rag"
         print(f"🔵 LLM classified as: {label}")
     except Exception:
@@ -175,6 +239,8 @@ def classifier_router(state: GlobalState):
         return "reservation_node"
     if state.get("route") == "update":
         return "update_node"
+    if state.get("route") == "cancel":
+        return "cancel_node"
     return "retrieve"
 
 def retrieve(state: GlobalState, vector_store):
@@ -692,6 +758,111 @@ def update_node(state: GlobalState):
     
     finally:
         db.close()
+
+def cancel_node(state: GlobalState):
+    """
+    Nodo que maneja el flujo de cancelación de reserva.
+    Similar a update pero más simple, solo necesita confirmar y cancelar.
+    """
+    if not state.get("pending_cancel"):
+        state["pending_cancel"] = True
+
+    db = SessionLocal()
+    try:
+        today = dt.datetime.now(ZoneInfo(TZ)).date().isoformat()
+
+        # Resolver event_id solo desde DB o cache
+        event_id = _resolve_event_id_db_cache(state)
+        if not event_id:
+            follow = "No encuentro tu reservación en nuestro sistema. Por favor, confirma si ya hiciste una previamente."
+            updated_messages = _roll_messages(
+                state["messages"] + [
+                    {"role": "user", "content": state["question"]},
+                    {"role": "assistant", "content": follow},
+                ]
+            )
+            return {**state, "answer": follow, "messages": updated_messages}
+
+        # Verificar si el mensaje del usuario contiene confirmación directa
+        user_msg_lower = state["question"].lower()
+        direct_confirmation_keywords = ["sí", "si", "confirmo", "confirmado", "ok", "okay", "está bien", "dale", "yes", "procede", "adelante"]
+        has_direct_confirmation = any(keyword in user_msg_lower for keyword in direct_confirmation_keywords)
+        
+        # Si el mensaje del usuario es explícito sobre cancelar (ya mencionó cancelar/eliminar), también es confirmación
+        cancel_keywords_in_msg = ["cancelar", "eliminar", "borrar", "anular", "cancela", "elimina"]
+        has_cancel_intent = any(keyword in user_msg_lower for keyword in cancel_keywords_in_msg)
+        
+        # Si hay confirmación directa o intención clara de cancelar, procedemos
+        if has_direct_confirmation or has_cancel_intent:
+            # Proceder con la cancelación directamente
+            pass
+        else:
+            # Preguntar confirmación con el LLM
+            convo = (
+                [{"role": "system", "content": cancel_prompt.format(today=today, tz=TZ)}]
+                + state["messages"]
+                + [{"role": "user", "content": state["question"]}]
+            )
+            resp = llm.invoke(convo)
+            raw = resp.content.strip()
+            
+            # Si el LLM no confirma, seguimos conversando
+            confirmation_keywords = ["confirmado", "confirmo", "sí", "si", "ok", "okay", "está bien", "dale", "yes"]
+            has_confirmation = any(keyword in raw.lower() for keyword in confirmation_keywords) or "CONFIRMADO" in raw
+            
+            if not has_confirmation:
+                updated_messages = _roll_messages(
+                    state["messages"] + [
+                        {"role": "user", "content": state["question"]},
+                        {"role": "assistant", "content": raw},
+                    ]
+                )
+                return {**state, "answer": raw, "messages": updated_messages, "pending_cancel": True}
+
+        # Llamada a la tool de cancelación
+        tool_res = cancel_reservation_tool.invoke({"event_id": event_id})
+
+        # Extraer resultado de la tool
+        success = not tool_res.startswith("❌")
+        tool_msg = tool_res.split("|EVENT_ID:")[0].strip() if "|EVENT_ID:" in tool_res else tool_res
+
+        # ACTUALIZAR LA BASE DE DATOS
+        from src.core.db import find_reservation_by_event_id
+
+        reservation = find_reservation_by_event_id(db, event_id)
+
+        if reservation:
+            # Actualizar estado a cancelled
+            reservation.status = "cancelled"
+            reservation.updated_at = dt.datetime.now(ZoneInfo(TZ))
+            db.commit()
+            print(f"Database updated: reservation {reservation.reservation_id} cancelled")
+        else:
+            print(f"Warning: Could not find reservation with event_id {event_id} in database")
+
+        # Mensaje humano
+        human_msg = tool_msg if success else f"Lo siento, {tool_msg}. Por favor, intenta de nuevo o contacta con el restaurante."
+
+        updated_messages = _roll_messages(
+            state["messages"] + [
+                {"role": "user", "content": state["question"]},
+                {"role": "assistant", "content": human_msg},
+            ]
+        )
+
+        # Salimos de modo cancel
+        state["pending_cancel"] = False
+
+        return {
+            **state,
+            "answer": human_msg,
+            "messages": updated_messages,
+            "reservation_data": {}
+        }
+
+    finally:
+        db.close()
+
 def build_app(vector_store):
     g = StateGraph(GlobalState)
     g.set_entry_point("classifier")
@@ -700,7 +871,8 @@ def build_app(vector_store):
     g.add_node("retrieve", lambda s: retrieve(s, vector_store))
     g.add_node("generate", generate)
     g.add_node("reservation_node", reservation_node)
-    g.add_node("update_node", update_node)       # <--- NUEVO
+    g.add_node("update_node", update_node)
+    g.add_node("cancel_node", cancel_node)
     g.add_node("output", lambda s: {**s})
 
     g.add_conditional_edges("classifier", classifier_router)
@@ -708,7 +880,8 @@ def build_app(vector_store):
     g.add_edge("retrieve", "generate")
     g.add_edge("generate", "output")
     g.add_edge("reservation_node", "output")
-    g.add_edge("update_node", "output")          # <--- NUEVO
+    g.add_edge("update_node", "output")
+    g.add_edge("cancel_node", "output")
 
     g.set_finish_point("output")
     return g.compile(checkpointer=MemorySaver())

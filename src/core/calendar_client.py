@@ -130,3 +130,26 @@ def update_event(service, calendar_id, event_id, summary: str | None = None, des
 
     except Exception as e:
         print(f"Tuvimos un error al actualizar tu reserva: {e}")
+
+def cancel_event(service, calendar_id, event_id):
+    """
+    Cancela (elimina) un evento del calendario.
+    
+    Args:
+        service: Servicio de Google Calendar
+        calendar_id: ID del calendario
+        event_id: ID del evento a cancelar
+        
+    Returns:
+        True si se canceló exitosamente, False en caso contrario
+    """
+    try:
+        service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+        print(f"Event cancelled: {event_id}")
+        return True
+    except HttpError as e:
+        print(f"Error al cancelar el evento: {e}")
+        return False
+    except Exception as e:
+        print(f"Tuvimos un error al cancelar tu reserva: {e}")
+        return False

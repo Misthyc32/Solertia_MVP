@@ -10,7 +10,7 @@ from src.core.db import (
     list_reservations_by_customer_id,
     upsert_user
 )
-from src.core.tools import reserva_restaurante_tool, update_reservation_tool
+from src.core.tools import reserva_restaurante_tool, update_reservation_tool, cancel_reservation_tool
 import datetime as dt
 from zoneinfo import ZoneInfo
 from src.core.config import TZ
@@ -146,6 +146,57 @@ class ReservationService:
             }
             
         except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        finally:
+            db.close()
+    
+    def cancel_reservation(self, event_id: str) -> Dict[str, Any]:
+        """
+        Cancel an existing reservation.
+        
+        Args:
+            event_id: Calendar event ID
+            
+        Returns:
+            Dictionary with cancellation result
+        """
+        db = SessionLocal()
+        try:
+            # Find reservation by event ID
+            reservation = find_reservation_by_event_id(db, event_id)
+            if not reservation:
+                return {
+                    "success": False,
+                    "error": "Reservation not found"
+                }
+            
+            # Cancel in calendar
+            tool_result = cancel_reservation_tool.invoke({"event_id": event_id})
+            
+            # Check if cancellation was successful
+            if tool_result.startswith("❌"):
+                return {
+                    "success": False,
+                    "error": tool_result
+                }
+            
+            # Update reservation status in database
+            reservation.status = "cancelled"
+            reservation.updated_at = dt.datetime.now(ZoneInfo(TZ))
+            db.commit()
+            
+            return {
+                "success": True,
+                "message": "Reservation cancelled successfully",
+                "reservation_id": reservation.reservation_id,
+                "event_id": event_id
+            }
+            
+        except Exception as e:
+            db.rollback()
             return {
                 "success": False,
                 "error": str(e)

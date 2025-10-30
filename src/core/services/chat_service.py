@@ -49,6 +49,7 @@ class ChatService:
                 "route": "",
                 "pending_reservation": False,
                 "pending_update": False,
+                "pending_cancel": False,
             }
             
             # Add user data if provided
@@ -74,6 +75,7 @@ class ChatService:
                 "route": state.get("route", ""),
                 "pending_reservation": state.get("pending_reservation", False),
                 "pending_update": state.get("pending_update", False),
+                "pending_cancel": state.get("pending_cancel", False),
                 "reservation_data": state.get("reservation_data", {}),
                 "customer_id": customer_id
             }

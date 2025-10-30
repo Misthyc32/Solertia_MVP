@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, validator
 from langchain.tools import tool
-from src.core.calendar_client import get_calendar_service, create_event, update_event, generate_calendar_invitation_link
+from src.core.calendar_client import get_calendar_service, create_event, update_event, cancel_event, generate_calendar_invitation_link
 from src.core.config import TZ
 import datetime as dt
 from typing import Optional
@@ -30,6 +30,9 @@ class ReservaUpdateInput(BaseModel):
     start_datetime: Optional[str] = Field(None, description="Nuevo inicio ISO8601, ej. '2025-08-14T16:00:00-06:00'")
     end_datetime: Optional[str] = Field(None, description="Nuevo fin ISO8601, ej. '2025-08-14T18:00:00-06:00'")
     tz: Optional[str] = Field(None, description="Timezone IANA, ej. 'America/Monterrey'")
+
+class ReservaCancelInput(BaseModel):
+    event_id: str = Field(..., description="ID del evento a cancelar en Google Calendar")
 
 @tool("reserva_restaurante", args_schema=ReservaInput, return_direct=True)
 def reserva_restaurante_tool(first_name: str, start_datetime: str, end_datetime: str, party_size: int, des:str) -> str:
@@ -138,6 +141,25 @@ def update_reservation_tool(event_id: str,first_name: Optional[str] = None,party
 
     except Exception as e:
         return f"Error al actualizar la reservación: {e}"
+
+@tool("cancel_reserva_restaurante", args_schema=ReservaCancelInput, return_direct=True)
+def cancel_reservation_tool(event_id: str) -> str:
+    """
+    Cancela una reservación en el calendario del restaurante.
+    Elimina el evento del calendario y devuelve confirmación.
+    """
+    try:
+        service = get_calendar_service()
+        success = cancel_event(service, CALENDAR_ID, event_id)
+        
+        if success:
+            response = f"✅ Reservación cancelada exitosamente.\n\n"
+            response += f"Tu reservación (Event ID: {event_id}) ha sido eliminada de nuestro calendario."
+            return f"{response}|EVENT_ID:{event_id}"
+        else:
+            return f"❌ Error al cancelar la reservación. Por favor, intenta de nuevo o contacta con el restaurante."
+    except Exception as e:
+        return f"❌ Error al cancelar la reservación: {e}"
     
 def get_last_event_id_tool(thread_id: str, require_confirmed: bool = True) -> str:
     """
