@@ -1,0 +1,43 @@
+########################
+# BACKEND (Python)
+########################
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# entornos virtuales
+.venv/
+venv/
+env/
+.env
+
+# Archivos de configuración sensibles
+backend/.env
+backend/credentials
+backend/token
+
+########################
+# FRONTEND (Node/React)
+########################
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+frontend/build/
+frontend/.turbo/
+frontend/.bun
+frontend/bun.lockb
+
+# envs del front
+frontend/.env
+frontend/.env.local
+frontend/.env.development
+frontend/.env.production
+
+########################
+# Generales / editor / OS
+########################
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
